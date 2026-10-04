@@ -23,7 +23,14 @@ Then, the same day, with a 2Captcha key and an EU residential proxy:
 | `--scraper-api`, own pool | an image post, a Reel, a carousel | 3/3 rows |
 | `--scraper-api`, invalid key | 2 URLs | exit 5 after one call |
 
-Not yet run live: a private profile, a gated (age-restricted) post, a
+**10-run sweep, 2026-10-04**: Playwright ×6 (3 direct, 3 via proxy),
+Puppeteer ×2, Selenium ×1, Scraper API ×1, each a profile and its 2
+latest posts. 9 runs complete (25 pages, one of them the private `@vogue`
+profile), the Scraper API run blocked by the login page. No captcha of any
+kind on any of the 26 pages; the only vendor string found, `arkose_captcha`,
+is a cookie-consent list entry.
+
+Not yet run live: a gated (age-restricted) post, a
 post with a hidden like count, `--proxy-file` rotation over several exits,
 `--cdp-endpoint`, the Docker image, and any run from a datacentre IP.
 Each of these is handled from the page's own flags or covered by the

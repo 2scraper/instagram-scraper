@@ -173,6 +173,18 @@ Followers", "48K likes"). The `web_profile_info` JSON endpoint older
 Instagram scrapers relied on answers `401 require_login` to a logged-out
 visitor (measured 2026-10-04) and is not used either.
 
+## Captchas
+
+None, so far. In 10 test runs on 2026-10-04 (26 pages: Playwright,
+Puppeteer and Selenium, direct and through a residential proxy, plus
+the Scraper API) no page carried a captcha widget, iframe or challenge
+script. Instagram does not show a logged-out visitor a captcha: it shows
+the login page, or the page without its data (below). The string
+`arkose_captcha` that appears on every page is an entry in Instagram's
+cookie-consent list of third-party services, not a challenge. The
+generic captcha detection stays on, so a real one would be reported as
+blocked rather than read as data.
+
 ## Rate limits
 
 Instagram limits logged-out reading per client, and a limited client is
@@ -294,7 +306,8 @@ Chromium.
 - **No exact post count and no Reel play count**: a logged-out visitor is
   not sent either (the "32K Posts" in the page's preview text is rounded).
 - **Private profiles** give a profile row with `is_private: true` and no
-  posts. Not yet seen in a live run; handled from the page's own flag.
+  posts (seen live on 2026-10-04: `@vogue` is a private "Vogue Covers"
+  account; the magazine is `@voguemagazine`).
 - **No location.** The post's location field was empty on all 36
   distinct posts of the live runs above, including 12 from a travel
   account, so there is no `location` column. If you find a logged-out
