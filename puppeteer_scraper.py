@@ -136,10 +136,38 @@ async def _launch(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
 
 
 async def _authenticate_if_needed(page, proxy: Optional[Proxy]) -> None:
-    if proxy is not None:
-        auth = proxy.pyppeteer_auth_dict()
-        if auth:
-            await page.authenticate(auth)
+    """Answer the proxy's auth challenge over the CDP `Fetch` domain.
+
+    pyppeteer's own `page.authenticate()` turns on
+    `Network.setRequestInterception`, which current Chromium no longer has:
+    measured 2026-10-04 with Chrome for Testing, every proxied URL failed
+    with "'Network.setRequestInterception' wasn't found" before a byte was
+    fetched. `Fetch` is that method's replacement and exists in every
+    Chromium since 74. Credentials travel in the CDP message, never argv."""
+    auth = proxy.pyppeteer_auth_dict() if proxy is not None else None
+    if not auth:
+        return
+    client = page._client
+
+    async def _continue(event):
+        try:
+            await client.send("Fetch.continueRequest", {"requestId": event["requestId"]})
+        except Exception as exc:  # noqa: BLE001 — a request cancelled meanwhile is not an error
+            log.debug("Fetch.continueRequest failed: %s", redact_credentials(str(exc)))
+
+    async def _answer(event):
+        try:
+            await client.send("Fetch.continueWithAuth", {
+                "requestId": event["requestId"],
+                "authChallengeResponse": {"response": "ProvideCredentials",
+                                          "username": auth["username"], "password": auth["password"]},
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Fetch.continueWithAuth failed: %s", redact_credentials(str(exc)))
+
+    client.on("Fetch.requestPaused", lambda event: asyncio.ensure_future(_continue(event)))
+    client.on("Fetch.authRequired", lambda event: asyncio.ensure_future(_answer(event)))
+    await client.send("Fetch.enable", {"handleAuthRequests": True, "patterns": [{"urlPattern": "*"}]})
 
 
 async def _enable_scraping_browser_auto_solve(page) -> None:

@@ -221,6 +221,8 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
                     _log.warning("Proxy reported dead: %s", last_error)
                 else:
                     _log.warning("Navigation attempt %d/%d for %s failed: %s", attempt + 1, args.retries + 1, url, last_error)
+                if getattr(engine, "fatal", None):
+                    break  # a refused key or an empty balance: every retry would fail the same way
                 if attempt < args.retries:
                     await engine.sleep(args.retry_delay)
         if last_error is not None:

@@ -22,7 +22,8 @@ video URL of a carousel). `--posts N` adds a profile's N most recent posts.
   key and no proxy: a profile and its 12 latest posts, 13 of 13 pages read;
   a 29-page mixed run (two profiles, a Reel, 24 posts, a dead username and a
   dead shortcode) read 27 rows and reported the two dead ones as not found.
-  All three engines were run live.
+  All three engines were run live, and Playwright and Puppeteer again
+  through a 2Captcha residential proxy (4 of 4 and 3 of 3).
 - **Honest results.** A throttled, blocked or partial run says so in its
   exit code and a `.meta.json` file next to the output. A run that finds
   nothing never overwrites your last good data.
@@ -70,8 +71,8 @@ python3 playwright_scraper.py --urls-file accounts.txt --posts 3
 python3 puppeteer_scraper.py --url natgeo --posts 2
 python3 selenium_scraper.py --url natgeo
 
-# without a browser: 2Captcha's Scraper API (needs TWOCAPTCHA_KEY)
-python3 playwright_scraper.py --scraper-api --url natgeo --posts 3
+# without a browser: 2Captcha's Scraper API (needs TWOCAPTCHA_KEY) — posts and Reels
+python3 playwright_scraper.py --scraper-api --urls-file posts.txt
 
 # compare two runs
 python3 diff_runs.py monday.json tuesday.json
@@ -193,6 +194,17 @@ address again and again. To read more: rotate residential exits with
 getting blocked is dropped), keep `--delay-between-pages` at 2s or more,
 or spread a big list over time.
 
+## Scraper API mode
+
+With `--scraper-api` no browser is driven: each page is one 2Captcha
+Scraper API call (`TWOCAPTCHA_KEY` in `.env`), routed through the
+Scraping Browser profile in `INSTAGRAM_CDP_ENDPOINT` when one is set.
+Measured on 2026-10-04 on the Scraper API's own pool: **posts and Reels
+read fully (3 of 3), profiles did not** — all four profiles tried got
+Instagram's login page, reported as blocked. Use it for post URLs; read
+profiles with a browser engine. A refused key or an empty balance stops
+the run at once with exit 5.
+
 ## Run results and exit codes
 
 Every run writes `<out>` and `<out>.meta.json` (status, `stop_reason`,
@@ -234,7 +246,7 @@ the command line.
 | `--format` / `--out` | json / `instagram_results.<format>` | output format and path |
 | `--proxy` / `--proxy-file` / `--proxy-shuffle` | `INSTAGRAM_PROXY` | one proxy or a rotating pool, for a local browser |
 | `--proxy-block-retries` | 3 | blocked answers before that proxy is dropped from the pool |
-| `--scraper-api` | off | no browser: fetch each page through 2Captcha's Scraper API (needs `TWOCAPTCHA_KEY`; routed through `INSTAGRAM_CDP_ENDPOINT` when set) |
+| `--scraper-api` | off | no browser: fetch each page through 2Captcha's Scraper API (needs `TWOCAPTCHA_KEY`; routed through `INSTAGRAM_CDP_ENDPOINT` when set) — posts only, see [Scraper API mode](#scraper-api-mode) |
 | `--cdp-endpoint` | `INSTAGRAM_CDP_ENDPOINT` | connect to a Scraping Browser API profile instead of launching a browser |
 | `--solve-captcha` | when-blocked | `off` disables the Browser API's own captcha auto-solve; there is no local solver |
 | `--max-solves` / `--min-score` | 8 / 0.3 | kept for the local solver, which is disabled; they change nothing today |
@@ -252,7 +264,9 @@ another site) is logged and skipped, never requested. Run any engine with
 
 - **Playwright** (`playwright_scraper.py`) is the recommended engine.
 - **Puppeteer** (`puppeteer_scraper.py`, via pyppeteer) supports the same
-  modes. pyppeteer itself is no longer maintained.
+  modes. pyppeteer itself is no longer maintained, and its own proxy login
+  no longer works on current Chromium, so this engine answers the proxy's
+  password prompt itself (over CDP `Fetch`).
 - **Selenium** (`selenium_scraper.py`) runs a local Chrome only.
   chromedriver cannot authenticate a Scraping Browser endpoint (the run
   exits 2 before fetching; use `--scraper-api` instead), and its
@@ -300,7 +314,7 @@ it, and do not use it to track individuals.
 ## Development
 
 ```bash
-python3 smoke_test.py            # 61 offline checks, no network, no engine needed
+python3 smoke_test.py            # 62 offline checks, no network, no engine needed
 python3 .github/ci_checks.py     # credential scan
 python3 -m unittest discover -s tests -p test_regressions.py  # failure and recovery scenarios
 ```

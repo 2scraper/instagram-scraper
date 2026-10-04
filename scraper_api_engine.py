@@ -13,6 +13,12 @@ It needs `TWOCAPTCHA_KEY` (the Scraper API's own auth). When
 `INSTAGRAM_CDP_ENDPOINT` is set, each call is routed through that Scraping
 Browser profile (`cdpurl`) and so leaves from its exit; otherwise it uses
 the Scraper API's own pool.
+
+Measured 2026-10-04 on the Scraper API's own pool: posts and Reels read
+fully (3 of 3), but every PROFILE came back as Instagram's login page
+(0 of 4: natgeo, nasa, instagram, natgeotravel) — reported as blocked,
+never as an empty profile. Profiles need a browser engine (with a proxy)
+or a Scraping Browser profile in `cdpurl`.
 """
 from __future__ import annotations
 

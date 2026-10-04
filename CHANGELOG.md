@@ -34,7 +34,18 @@ First release.
 - Daily canary through a residential proxy (`INSTAGRAM_PROXY` secret);
   skips with a notice without it.
 
+### Fixed (before release)
+
+- Puppeteer through a password proxy: pyppeteer's `page.authenticate()`
+  needs `Network.setRequestInterception`, which current Chromium no longer
+  has, so every proxied URL failed. The engine now answers the proxy's
+  auth challenge over CDP `Fetch` (live: 3/3 through a residential proxy).
+  The same call is in the other repos' `puppeteer_scraper.py`.
+
 ### Measured, not shipped
+
+- `--scraper-api` on the Scraper API's own pool reads posts and Reels
+  (3/3) but gets the login page for profiles (0/4).
 
 - `web_profile_info` answers 401 `require_login` logged out (2026-10-04),
   so it is not used.

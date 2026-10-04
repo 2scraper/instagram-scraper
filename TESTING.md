@@ -13,8 +13,18 @@ and no proxy:
 | curl (not this tool) | ~75 page loads in an hour | profile and post pages served WITHOUT their data — the fixture `instagram_throttled_*` |
 | curl / in-page fetch | `/api/v1/users/web_profile_info/` | 401 `require_login` from a home IP, a residential proxy and inside a loaded page |
 
+Then, the same day, with a 2Captcha key and an EU residential proxy:
+
+| Engine | Run | Result |
+|---|---|---|
+| Playwright + `INSTAGRAM_PROXY` | `--url natgeo --posts 3` | 4/4 rows, exit 0; the log names the exit, password masked |
+| Puppeteer + `INSTAGRAM_PROXY` | `--url natgeo --posts 2` | before the fix: every URL failed (`Network.setRequestInterception` wasn't found); after answering auth over CDP `Fetch`: 3/3, exit 0 |
+| `--scraper-api`, own pool | 4 profiles | 0/4 — Instagram's login page each time, reported as blocked (exit 3 / partial) |
+| `--scraper-api`, own pool | an image post, a Reel, a carousel | 3/3 rows |
+| `--scraper-api`, invalid key | 2 URLs | exit 5 after one call |
+
 Not yet run live: a private profile, a gated (age-restricted) post, a
-post with a hidden like count, `--proxy` / `--proxy-file`, `--scraper-api`,
+post with a hidden like count, `--proxy-file` rotation over several exits,
 `--cdp-endpoint`, the Docker image, and any run from a datacentre IP.
 Each of these is handled from the page's own flags or covered by the
 offline suite, but has no live evidence behind it yet.

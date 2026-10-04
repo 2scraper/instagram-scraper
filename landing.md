@@ -31,7 +31,7 @@ Every row comes from the data Instagram embeds in the page itself, not from the 
 | Product | What it's for |
 |---|---|
 | **Proxies — 2captcha.com/proxy** (2prx.com is the same product, different name) | The one that matters here: Instagram limits logged-out reading per client. Residential exits in `.env` or `--proxy-file`, rotated per URL with per-exit failure tracking |
-| **Scraper API — 2captcha.com** | No browser at all: `--scraper-api` fetches each profile and post page from 2Captcha's side, one HTTP call each |
+| **Scraper API — 2captcha.com** | No browser at all: `--scraper-api` fetches each post or Reel page from 2Captcha's side, one HTTP call each (profiles need a browser engine) |
 | **Scraping Browser API — 2captcha.com** | A remote browser session over CDP with its own proxy, fingerprint and captcha auto-solve bundled — `--cdp-endpoint` |
 | **Browser fingerprints — 2captcha Fingerprint API** | Pin a specific OS/browser/country fingerprint for a locally-launched browser |
 

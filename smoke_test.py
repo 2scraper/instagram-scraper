@@ -1059,6 +1059,14 @@ def _():
     assert src.index("if args.scraper_api:") < src.index("_cdp_endpoint_has_credentials(args.cdp_endpoint):\n")
 
 
+@check("pyppeteer answers proxy auth over CDP Fetch, never page.authenticate() — measured 2026-10-04: current Chromium has no Network.setRequestInterception, so every proxied URL failed")
+def _():
+    src = (ROOT / "puppeteer_scraper.py").read_text(encoding="utf-8")
+    assert "await page.authenticate(" not in src
+    for op in ('"Fetch.enable"', '"Fetch.authRequired"', '"Fetch.continueWithAuth"', '"Fetch.requestPaused"', '"Fetch.continueRequest"'):
+        assert op in src, op
+
+
 def run() -> int:
     """All @check-decorated functions above already ran at import time
     (that's the point — see the `check()` docstring) and self-registered
