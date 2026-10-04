@@ -38,11 +38,23 @@ def fetch_fingerprint(
 
 
 def user_agent_from(fingerprint: dict) -> Optional[str]:
-    ua = fingerprint.get("userAgent")
+    """The user agent string of a Fingerprint API profile, or None.
+
+    The live `format=chromium` response (measured 2026-10-04, /random and
+    /generate alike) carries it as `userAgent.userAgent`, next to
+    `fullVersion`, `platform` and `brandVersionList`. The documentation's
+    /random example shows `userAgent.value` instead, which no live response
+    has had — reading only that key made `--fingerprint` a silent no-op in
+    every engine. `value` stays as a fallback in case the docs' shape ever
+    ships; a profile with neither is reported, never applied as nothing."""
+    ua = fingerprint.get("userAgent") if isinstance(fingerprint, dict) else None
     if isinstance(ua, dict):
-        return ua.get("value")
-    if isinstance(ua, str):
+        for key in ("userAgent", "value"):
+            if isinstance(ua.get(key), str) and ua[key]:
+                return ua[key]
+    if isinstance(ua, str) and ua:
         return ua
+    log.warning("Fingerprint API profile carried no user agent — continuing with the browser's own.")
     return None
 
 

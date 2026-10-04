@@ -42,6 +42,14 @@ First release.
   auth challenge over CDP `Fetch` (live: 3/3 through a residential proxy).
   The same call is in the other repos' `puppeteer_scraper.py`.
 
+- `--fingerprint` was a silent no-op in all three engines: the client read
+  the user agent from `userAgent.value` (the documentation's /random
+  example), while every live response carries it as
+  `userAgent.userAgent`. Both are read now, the applied user agent is
+  logged, and a profile without one is reported. Live: the page saw the
+  fingerprint's Windows user agent instead of the local `HeadlessChrome`.
+  The same reader is in the other repos' `fingerprint_client.py`.
+
 ### Measured, not shipped
 
 - `--scraper-api` on the Scraper API's own pool reads posts and Reels

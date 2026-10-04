@@ -1067,6 +1067,20 @@ def _():
         assert op in src, op
 
 
+@check("fingerprint_client.user_agent_from reads the LIVE response shape (userAgent.userAgent, measured 2026-10-04) and the documented one (userAgent.value); nothing applied when neither is there")
+def _():
+    import fingerprint_client as fc
+    live = {"id": 6472645, "country": "US", "userAgent": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "fullVersion": "152.0.7977.64", "platform": "Windows", "platformVersion": "10.0.0", "mobile": False}}
+    assert fc.user_agent_from(live).startswith("Mozilla/5.0 (Windows NT 10.0"), "the live shape — reading only `value` made --fingerprint a no-op"
+    assert fc.user_agent_from({"userAgent": {"value": "UA-doc"}}) == "UA-doc"
+    for empty in ({}, {"userAgent": {}}, {"userAgent": {"userAgent": ""}}, None):
+        assert fc.user_agent_from(empty) is None, empty
+    for path in ("playwright_scraper.py", "puppeteer_scraper.py", "selenium_scraper.py"):
+        assert 'log.info("Fingerprint applied: user agent %s", user_agent)' in (ROOT / path).read_text(encoding="utf-8"), path
+
+
 def run() -> int:
     """All @check-decorated functions above already ran at import time
     (that's the point — see the `check()` docstring) and self-registered

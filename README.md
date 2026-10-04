@@ -327,7 +327,7 @@ it, and do not use it to track individuals.
 ## Development
 
 ```bash
-python3 smoke_test.py            # 62 offline checks, no network, no engine needed
+python3 smoke_test.py            # 63 offline checks, no network, no engine needed
 python3 .github/ci_checks.py     # credential scan
 python3 -m unittest discover -s tests -p test_regressions.py  # failure and recovery scenarios
 ```

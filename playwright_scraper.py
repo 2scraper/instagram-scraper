@@ -271,6 +271,8 @@ async def run(args: argparse.Namespace) -> int:
             profile = fetch_fingerprint(client, tags=args.fp_tags, country=args.fp_country)
             if profile:
                 user_agent = user_agent_from(profile)
+                if user_agent:
+                    log.info("Fingerprint applied: user agent %s", user_agent)
 
     try:
         async with async_playwright() as pw:
