@@ -107,6 +107,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dump-html", action="store_true")
     p.add_argument("--headless", dest="headless", action="store_true", default=True)
     p.add_argument("--headful", dest="headless", action="store_false")
+    page_flow.add_run_arguments(p)
     return p
 
 

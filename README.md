@@ -13,7 +13,7 @@ logging in.** Give it a username, a profile URL, a post or Reel URL, or a
 file of them; get back one row per profile (name, bio, links, followers,
 following, verified, private) and one row per post (date, likes, comments,
 caption, hashtags, mentions, co-authors, tagged accounts, every image or
-video URL of a carousel). `--posts N` adds a profile's N most recent posts.
+video URL of a carousel). `--posts N` adds the first N posts in its available timeline (pinned first).
 
 - **No account, no cookies.** It reads what Instagram shows any logged-out
   visitor: the data the site embeds in the page itself. No password, no
@@ -203,7 +203,7 @@ a proxy pool it stops after 3 blocked answers in a row and reports the
 rest of the list as `not_attempted`, instead of asking a throttled
 address again and again. To read more: rotate residential exits with
 `--proxy-file` (each URL gets the next exit, and an exit that keeps
-getting blocked is dropped), keep `--delay-between-pages` at 2s or more,
+getting blocked is dropped; an exhausted pool stops the run and never falls back to a direct connection), keep `--delay-between-pages` at 2s or more,
 or spread a big list over time.
 
 ## Scraper API mode
@@ -228,20 +228,83 @@ neither, so it never replaces your previous good file.
 | Exit | Meaning |
 |---|---|
 | `0` | complete |
-| `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `parse_error`) |
+| `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `parse_error`, `proxy_pool_exhausted`) |
 | `3` | blocked or throttled, no rows |
-| `4` | only not-found profiles or posts |
+| `4` | No selected rows: not-found inputs, date-filtered posts or previously collected posts |
 | `5` | nothing could be read due to fetch, parse, or remote-service failure; no rows |
 | `2` | bad usage, including input where every line was skipped |
 | `1` | crash (a bug; please report it) |
 
-## Comparing runs
+## Monitoring changes
 
-`diff_runs.py old.json new.json` compares two complete runs by `sku`: rows
-added and removed. It refuses comparisons that would mislead: two runs of
-different selections (the full input list, `--posts` and the limit), or a
-`.meta.json` that does not match its file. `--json` prints the diff as
-JSON.
+```bash
+python3 diff_runs.py monday.json tuesday.json --json
+python3 diff_runs.py monday.json tuesday.json --fields follower_count,like_count,caption --fail-on-change
+```
+
+Compare complete snapshots with the same input selection and date filter.
+`field_changes` contains old/new values for follower and following counts,
+likes, comments, caption, biography, full name, verified/private status and
+hidden-like status. Numeric changes include a delta when both values are
+known; a missing value is never treated as zero. JSON and CSV snapshots can
+be compared. `--fields` selects which fields to monitor. `--fail-on-change`
+returns 1 for monitored changes or membership changes, including
+`left_selection`.
+
+Post windows are limited (`--posts`, pinned first, at most 12 available), so
+a post missing from the next window is `left_selection`, not proof of
+deletion. Incompatible selections, partial runs and mismatched output hashes
+are refused. Incremental delta outputs are not full snapshots and cannot be
+used with diff; use normal runs when monitoring engagement changes.
+
+## Date filter and incremental collection
+
+```bash
+# Profiles remain in the output; posts must be on/after midnight UTC.
+python3 playwright_scraper.py --url natgeo --posts 12 --since 2026-10-01 --out first.json
+
+# Same selection: refresh profiles, fetch only previously unseen post IDs.
+python3 playwright_scraper.py --url natgeo --posts 12 --since 2026-10-01 --incremental-from first.json --out next.json
+# The next delta carries the accumulated IDs and can seed another delta.
+python3 playwright_scraper.py --url natgeo --posts 12 --since 2026-10-01 --incremental-from next.json --out later.json
+```
+
+`--since` accepts an ISO date or timestamp; a missing timezone means UTC.
+The boundary is inclusive. Every selected post is checked, even after an
+older pinned post. Missing/invalid timestamps produce partial data instead
+of silently passing the filter. Profiles are retained independently of date.
+This filters the available window; it does not fetch older history beyond
+Instagram's logged-out timeline.
+
+`--incremental-from` accepts a complete JSON or CSV result with matching
+metadata and output hash. The input list, posts limit, total limit and date
+filter must match. Profiles are refreshed; known post IDs are skipped before
+navigation. Delta metadata carries `seen_post_skus` for chaining, including posts
+excluded by `--since` (a post's date never changes, so they are not fetched again). Known posts'
+likes and captions are not refreshed in this mode. Keep a normal snapshot
+schedule if you need those changes.
+
+`excluded_urls` records `before_since` and `already_seen`. When everything
+is excluded and no profile is requested, exit 4 means no rows selected;
+without `--allow-empty`, previous output is preserved. Limits count selected
+URLs, including known posts, rather than promising N new posts.
+
+## Resume interrupted collection
+
+```bash
+python3 playwright_scraper.py --url natgeo --posts 12 --checkpoint progress.json --out results.json
+# After interruption or a partial run; keep selection flags unchanged:
+python3 playwright_scraper.py --url natgeo --posts 12 --checkpoint progress.json --resume --out results.json
+```
+
+The checkpoint is written atomically after each URL and contains the discovered
+queue, rows and outcomes, but no credentials or HTML. Resume retains successful
+rows and skips completed, not-found and filtered URLs; failed URLs are retried.
+A cancellation during a request leaves that URL pending. Queue order, post
+limits and any date/incremental configuration must match the checkpoint.
+Use a new checkpoint for a fresh refresh: resuming an already completed run
+reuses its data. Checkpoints must be separate from inputs, output and sidecars.
+They contain profile/post data and should be stored like the result files.
 
 ## Options
 
@@ -252,8 +315,11 @@ the command line.
 | Option | Default | |
 |---|---|---|
 | `--url` / `--urls-file` | | what to scrape: a username, `@username`, profile URL, post or Reel URL; a file has one per line |
-| `--posts` | 0 | also fetch each profile's N most recent posts, 0-12 (a logged-out profile page embeds 12, pinned first) |
-| `--max-results` | 100 | URLs to fetch in total, profiles and posts together |
+| `--posts` | 0 | Fetch the first N available timeline posts, 0-12, pinned first |
+| `--max-results` | 100 | Selected URL limit, profiles and posts together; skipped known posts also count |
+| `--since` | unset | Inclusive ISO post timestamp/date filter; default timezone UTC |
+| `--incremental-from` | unset | Matching complete JSON/CSV snapshot or prior delta; refresh profiles and skip known posts |
+| `--checkpoint` / `--resume` | unset / off | Save progress atomically / continue the matching checkpoint |
 | `--delay-between-pages` | 2s | pause between URLs |
 | `--format` / `--out` | json / `instagram_results.<format>` | output format and path |
 | `--proxy` / `--proxy-file` / `--proxy-shuffle` | `INSTAGRAM_PROXY` | one proxy or a rotating pool, for a local browser |
@@ -329,7 +395,7 @@ it, and do not use it to track individuals.
 ```bash
 python3 smoke_test.py            # 63 offline checks, no network, no engine needed
 python3 .github/ci_checks.py     # credential scan
-python3 -m unittest discover -s tests -p test_regressions.py  # failure and recovery scenarios
+python3 -m unittest discover -s tests -p 'test_*.py'  # failure and recovery scenarios
 ```
 
 Parser checks run on real captures in `tests/fixtures/`. CI runs the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""diff_runs.py — diff two runs by `sku`. No site knowledge.
+"""diff_runs.py — compare complete snapshots by SKU and selected Instagram fields.
 
 Refuses to compare two runs that are not both `status == "complete"` in
 their `.meta.json` sidecar: a partial run's un-fetched pages would otherwise
@@ -33,6 +33,26 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 from urllib.parse import parse_qsl, urlencode, urlparse
+
+
+MONITOR_FIELDS = ("follower_count", "following_count", "like_count", "comment_count",
+                  "caption", "biography", "full_name", "is_verified", "is_private", "likes_hidden")
+NUMERIC_FIELDS = {"follower_count", "following_count", "like_count", "comment_count"}
+BOOL_FIELDS = {"is_verified", "is_private", "likes_hidden"}
+
+
+def field_value(row, field):
+    value = row.get(field)
+    if value is None or value == "":
+        return None
+    if field in NUMERIC_FIELDS and isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if field in BOOL_FIELDS and isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return value
 
 
 def _load_meta(run_path: str) -> dict:
@@ -69,7 +89,10 @@ def normalize_scope(url: str) -> str:
     return f"{parts.netloc.lower()}{parts.path.rstrip('/')}?{query}"
 
 
-def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False) -> dict:
+def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False, fields=None) -> dict:
+    fields = list(MONITOR_FIELDS if fields is None else fields)
+    if any(name not in MONITOR_FIELDS for name in fields):
+        raise ValueError("Unsupported monitor field; choose from " + ", ".join(MONITOR_FIELDS))
     old_meta, new_meta = _load_meta(old_path), _load_meta(new_path)
     for label, meta in (("old", old_meta), ("new", new_meta)):
         if meta.get("status") != "complete":
@@ -94,7 +117,11 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False) -
         )
     if not allow_different_scope and old_meta.get("selection") != new_meta.get("selection"):
         raise SystemExit("error: refusing to diff different input selections (or legacy metadata without selection).")
-    capped = bool(old_meta.get("capped") or new_meta.get("capped"))
+    if old_meta.get("incremental") or new_meta.get("incremental"):
+        raise SystemExit("error: incremental outputs contain only new posts; compare full snapshots instead.")
+    capped = bool(old_meta.get("capped") or new_meta.get("capped")
+                  or (old_meta.get("selection") or {}).get("posts")
+                  or (new_meta.get("selection") or {}).get("posts"))
 
     old_rows, new_rows = _index_by_sku(_load_rows(old_path)), _index_by_sku(_load_rows(new_path))
     old_skus, new_skus = set(old_rows), set(new_rows)
@@ -102,10 +129,19 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False) -
     added = sorted(new_skus - old_skus)
     missing = sorted(old_skus - new_skus)
     removed, left_selection = ([], missing) if capped else (missing, [])
-    changed, source_changed, currency_changed = [], [], []
+    changed, source_changed, currency_changed, field_changes = [], [], [], []
 
     for sku in sorted(old_skus & new_skus):
         o, n = old_rows[sku], new_rows[sku]
+        changes = {}
+        for name in fields:
+            before, after = field_value(o, name), field_value(n, name)
+            if before != after:
+                changes[name] = {"old": before, "new": after}
+                if name in NUMERIC_FIELDS and isinstance(before, int) and isinstance(after, int):
+                    changes[name]["delta"] = after - before
+        if changes:
+            field_changes.append({"sku": sku, "fields": changes})
         old_price, new_price = o.get("price"), n.get("price")
         if (o.get("currency") or None) != (n.get("currency") or None):
             currency_changed.append({
@@ -125,7 +161,7 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False) -
 
     return {
         "added": added, "removed": removed, "left_selection": left_selection,
-        "changed": changed, "source_changed": source_changed, "currency_changed": currency_changed,
+        "field_changes": field_changes, "changed": changed, "source_changed": source_changed, "currency_changed": currency_changed,
         "old_count": len(old_rows), "new_count": len(new_rows), "capped": capped,
     }
 
@@ -135,13 +171,17 @@ def main() -> int:
     p.add_argument("old_run")
     p.add_argument("new_run")
     p.add_argument("--fail-on-change", action="store_true",
-                    help="Exit 1 if any REAL price change is found (source_changed rows are ignored)")
+                    help="Exit 1 when monitored fields or selection membership change")
     p.add_argument("--json", action="store_true", help="Print the diff as JSON instead of a summary")
     p.add_argument("--allow-different-scope", action="store_true",
                     help="Compare runs whose sidecar URLs (market, query, category) differ")
+    p.add_argument("--fields", help="Comma-separated fields to monitor; default: " + ",".join(MONITOR_FIELDS))
     args = p.parse_args()
+    fields = [name.strip() for name in args.fields.split(",") if name.strip()] if args.fields else None
+    if fields and any(name not in MONITOR_FIELDS for name in fields):
+        p.error("Unknown --fields value; choose from " + ",".join(MONITOR_FIELDS))
 
-    result = diff(args.old_run, args.new_run, allow_different_scope=args.allow_different_scope)
+    result = diff(args.old_run, args.new_run, allow_different_scope=args.allow_different_scope, fields=fields)
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -151,11 +191,14 @@ def main() -> int:
         print(f"  removed:        {len(result['removed'])}")
         if result["capped"]:
             print(f"  left_selection: {len(result['left_selection'])} (a capped top-N run: fell out of the selection, not delisted)")
+        print(f"  monitored rows changed: {len(result['field_changes'])}")
+        for entry in result["field_changes"]:
+            print(f"    {entry['sku']}: " + json.dumps(entry["fields"], ensure_ascii=False))
         print(f"  price changed:  {len(result['changed'])}")
         print(f"  source_changed: {len(result['source_changed'])} (ignored by --fail-on-change)")
         print(f"  currency_changed: {len(result['currency_changed'])} (ignored by --fail-on-change: a market change, not a price change)")
 
-    if args.fail_on_change and result["changed"]:
+    if args.fail_on_change and any(result[key] for key in ("changed", "field_changes", "added", "removed", "left_selection")):
         return 1
     return 0
 

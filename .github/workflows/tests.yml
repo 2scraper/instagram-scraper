@@ -23,7 +23,7 @@ jobs:
       - name: Run the offline smoke suite
         run: python3 smoke_test.py
       - name: Audit regression scenarios
-        run: python3 -m unittest discover -s tests -p test_regressions.py
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: --help works for every CLI
         run: |
           for engine in playwright_scraper selenium_scraper puppeteer_scraper; do

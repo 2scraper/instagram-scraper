@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements-playwright.txt \
 # in CI.
 COPY env_config.py proxy_pool.py output_writer.py captcha_solver.py \
      fingerprint_client.py scraper_api_client.py scraper_api_engine.py diff_runs.py \
-     page_parser.py page_flow.py playwright_scraper.py puppeteer_scraper.py \
+     page_parser.py page_flow.py run_state.py playwright_scraper.py puppeteer_scraper.py \
      selenium_scraper.py smoke_test.py ./
 # smoke_test.py also reads these straight off disk (the ENV_KEYS<->
 # .env.example sync check and the banned-wording sweep) — missing any one
@@ -29,7 +29,7 @@ COPY env_config.py proxy_pool.py output_writer.py captcha_solver.py \
 COPY .env.example sample_output.json sample_output.csv ./
 COPY tests ./tests
 
-RUN python3 smoke_test.py && python3 -m unittest discover -s tests -p test_regressions.py
+RUN python3 smoke_test.py && python3 -m unittest discover -s tests -p 'test_*.py'
 
 # The test suite and its fixtures are needed to VERIFY the build above, not
 # to run the scraper — the image should carry no test suite and no stray

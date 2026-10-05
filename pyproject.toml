@@ -39,6 +39,7 @@ py-modules = [
     "diff_runs",
     "page_parser",
     "page_flow",
+    "run_state",
     "playwright_scraper",
     "selenium_scraper",
     "puppeteer_scraper",

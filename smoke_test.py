@@ -943,7 +943,7 @@ def _():
     profile, post = _fx("profile_natgeo"), _fx("post_image")
     rc, meta, rows, eng = _pflow({_PROFILE_URL: {"html": profile}}, ["--url", "natgeo"])
     assert rc == output_writer.EXIT_OK and [r["sku"] for r in rows] == ["instagram-user-787132"] and eng.asked == [_PROFILE_URL]
-    assert meta["selection"] == {"mode": "urls", "urls": [_PROFILE_URL], "posts": 0, "max_results": 100}
+    assert meta["selection"] == {"mode": "urls", "urls": [_PROFILE_URL], "posts": 0, "max_results": 100, "since": None, "incremental_sha256": None}
 
     rc, meta, rows, eng = _pflow({_PROFILE_URL: {"html": profile}, _IMAGE_URL: {"html": post}, "*": {"html": _fx("not_found")}},
                                  ["--urls-file", str(_urls_file(["@natgeo", "https://www.instagram.com/p/DeAZ0uAgNuA/", "natgeo"])), "--posts", "3"])

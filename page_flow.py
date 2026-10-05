@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import page_parser as pp
+import run_state
+from run_state import add_arguments as add_run_arguments
 from captcha_solver import detect_from_html
 from output_writer import Product
 
@@ -67,6 +69,7 @@ class Outcome:
     failure: Optional[str] = None
     rate_limited: bool = False
     post_codes: List[str] = field(default_factory=list)
+    timeline_status: Optional[str] = None
 
 
 def decide(*, url: str, http_status: Optional[int], html: str) -> Outcome:
@@ -83,7 +86,8 @@ def decide(*, url: str, http_status: Optional[int], html: str) -> Outcome:
 
     result = pp.safe_parse_page(html or "", url=url)
     if result.products:
-        return Outcome(result.products[0], False, False, result.source_used, post_codes=list(result.post_codes or []))
+        return Outcome(result.products[0], False, False, result.source_used, post_codes=list(result.post_codes or []),
+                       timeline_status=result.timeline_status)
     if result.gated:
         return Outcome(None, False, False, "none",
                        [f"{url}: the post exists but Instagram withholds it from a logged-out visitor — no row (login_required)."],
@@ -200,7 +204,9 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
     """One profile or post URL: a typed outcome, including unread and
     rejected data. Open the page, wait out a challenge (bounded), solve one
     within budget, then read the embedded JSON."""
-    proxy = proxy_pool.next() if proxy_pool else None
+    proxy = proxy_pool.next() if proxy_pool is not None else None
+    if proxy_pool is not None and proxy is None:
+        return Outcome(None, False, False, "none", failure="proxy_pool_exhausted")
     _log.info("Fetching %s (proxy: %s)", url, proxy.masked() if proxy else "(none — direct, or the --cdp-endpoint session's own exit)")
     try:
         session = await engine.open(proxy)
@@ -254,7 +260,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
             if outcome.blocked:
                 # A login wall is a property of the EXIT (CLAUDE.md §8: a
                 # rotation is a fresh browser), so count it against the proxy.
-                proxy_pool.report_failure(proxy, dead=status in (403, 429))
+                proxy_pool.report_failure(proxy, dead=True)
             else:
                 proxy_pool.report_success(proxy)
         if args.dump_html:
@@ -276,85 +282,133 @@ async def _close_session(session):
         _log.warning("Session cleanup failed: %s", _redact(str(exc)))
 
 
+def _post_sku(url: str) -> Optional[str]:
+    kind, key = pp.classify_url(url)
+    return pp.make_sku("post", key) if kind == "post" else None
+
+
+def _already_seen(args, url: str) -> bool:
+    sku = _post_sku(url)
+    return sku is not None and sku in getattr(args, "_known_posts", set())
+
+
 async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, started_at: float) -> int:
     """Fetch every URL in input order. A profile's `--posts N` shortcodes
     are queued right after it, so the output keeps each profile next to its
     posts. `--max-results` caps the total number of URLs fetched."""
+    from dataclasses import asdict
+
+    try:
+        state = run_state.prepare(args, urls)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        _log.error("Invalid run state: %s", _redact(str(exc)))
+        return 2
     posts_per_profile = min(max(0, int(getattr(args, "posts", 0) or 0)), MAX_TIMELINE_POSTS)
-    queue: List[str] = list(urls)
+    queue = list(state["queue"] if state else urls)
+    records = dict(state["records"] if state else {})
     queued = set(queue)
-    products: List[Product] = []
-    failed_pages: List[int] = []
-    failures = []
-    not_found = []
-    any_blocked = rate_limited = remote_api_error = False
-    completed = 0
+    run_state.save(args, urls, queue, records)
     consecutive_blocks = 0
     i = 0
-    capped = len(queue) > args.max_results
-    while i < len(queue) and i < args.max_results:
+    while i < min(len(queue), args.max_results):
         url = queue[i]
         i += 1
+        if records.get(url, {}).get("done"):
+            continue
+        if _already_seen(args, url):
+            records[url] = {"done": True, "excluded": "already_seen"}
+            run_state.save(args, urls, queue, records)
+            continue
         outcome = await fetch_item(engine, args, url, i, proxy_pool, client)
-        any_blocked = any_blocked or outcome.blocked
-        rate_limited = rate_limited or outcome.rate_limited
-        remote_api_error = remote_api_error or outcome.failure == "remote_api_error"
-        if outcome.failure or outcome.blocked:
-            failed_pages.append(i)
-            failures.append({"url": url, "reason": outcome.failure or ("rate_limited" if outcome.rate_limited else "blocked")})
-        else:
-            completed += 1
-        if outcome.not_found:
-            not_found.append(url)
-        if outcome.product is not None:
-            products.append(outcome.product)
-            if posts_per_profile and outcome.product.category == "profile":
-                new = [pp.post_url(c) for c in outcome.post_codes[:posts_per_profile]]
-                new = [u for u in new if u not in queued]
-                queue[i:i] = new
-                queued.update(new)
-                if outcome.product.is_private and not new:
-                    _log.info("%s is private: its posts are not shown to a logged-out visitor.", url)
-        capped = capped or len(queue) > args.max_results
+        if outcome.product is not None and outcome.product.category == "profile" and posts_per_profile:
+            if outcome.timeline_status not in ("present", "private"):
+                outcome.failure = "parse_error"
+            new = [pp.post_url(c) for c in outcome.post_codes[:posts_per_profile]]
+            new = list(dict.fromkeys(u for u in new if u not in queued))
+            queue[i:i] = new
+            queued.update(new)
+        excluded = None
+        if outcome.product is not None and outcome.product.category == "post" and args._since:
+            try:
+                posted = run_state.utc_date(outcome.product.posted_at)
+            except ValueError:
+                outcome.failure = "parse_error"
+            else:
+                if posted < run_state.utc_date(args._since):
+                    excluded = "before_since"
+                    outcome.product = None
+        record = {"done": not (outcome.failure or outcome.blocked),
+                  "product": asdict(outcome.product) if outcome.product else None,
+                  "blocked": outcome.blocked, "rate_limited": outcome.rate_limited,
+                  "failure": outcome.failure, "not_found": outcome.not_found, "excluded": excluded}
+        records[url] = record
+        run_state.save(args, urls, queue, records)
         consecutive_blocks = consecutive_blocks + 1 if outcome.blocked else 0
-        if proxy_pool is None and consecutive_blocks >= STOP_AFTER_CONSECUTIVE_BLOCKS and i < min(len(queue), args.max_results):
-            _log.error("%d blocked answers in a row from the same exit — stopping instead of asking again. "
-                       "Rerun later, or with --proxy-file to rotate exits.", consecutive_blocks)
-            for j, pending in enumerate(queue[i:args.max_results], i + 1):
-                failed_pages.append(j)
-                failures.append({"url": pending, "reason": "not_attempted"})
-            break
-        if getattr(engine, "fatal", None):
-            for j, pending in enumerate(queue[i:args.max_results], i + 1):
-                failed_pages.append(j)
-                failures.append({"url": pending, "reason": "remote_api_error"})
+        stop = (outcome.failure == "proxy_pool_exhausted" or getattr(engine, "fatal", None)
+                or (proxy_pool is None and consecutive_blocks >= STOP_AFTER_CONSECUTIVE_BLOCKS))
+        if stop:
+            for pending in queue[i:args.max_results]:
+                if records.get(pending, {}).get("done"):
+                    continue
+                # A known post needs no fetch, so a stop does not leave it unread.
+                records[pending] = ({"done": True, "excluded": "already_seen"} if _already_seen(args, pending)
+                                    else {"done": False, "failure": "not_attempted"})
+            run_state.save(args, urls, queue, records)
             break
         if i < min(len(queue), args.max_results):
             await engine.sleep(args.delay_between_pages)
-    return finish(args, products=products, blocked=any_blocked, remote_api_error=remote_api_error,
+    products, failures, failed_pages, not_found, exclusions = [], [], [], [], []
+    completed = 0
+    blocked = rate_limited = remote_error = False
+    for index, url in enumerate(queue[:args.max_results], 1):
+        record = records.get(url, {"done": False, "failure": "not_attempted"})
+        if record.get("product"):
+            products.append(Product(**record["product"]))
+        blocked = blocked or record.get("blocked", False)
+        rate_limited = rate_limited or record.get("rate_limited", False)
+        remote_error = remote_error or record.get("failure") == "remote_api_error"
+        if record["done"]:
+            completed += 1
+        else:
+            failed_pages.append(index)
+            failures.append({"url": url, "reason": record.get("failure") or
+                             ("rate_limited" if record.get("rate_limited") else "blocked")})
+        if record.get("not_found"):
+            not_found.append(url)
+        if record.get("excluded"):
+            exclusions.append({"url": url, "reason": record["excluded"]})
+    return finish(args, products=products, blocked=blocked, remote_api_error=remote_error,
                   engine_name=engine.name, urls=urls, fetched=queue[:args.max_results], started_at=started_at,
                   pages_completed=completed, failed_pages=failed_pages, failures=failures,
-                  rate_limited=rate_limited, not_found=not_found, capped=capped)
+                  rate_limited=rate_limited, not_found=not_found,
+                  capped=len(queue) > args.max_results or posts_per_profile > 0, exclusions=exclusions)
 
 
 def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
            urls: List[str], started_at: float, pages_completed: int, failed_pages: List[int],
            failures=None, rate_limited=False, fetched: Optional[List[str]] = None, not_found=None,
-           capped: Optional[bool] = None) -> int:
+           capped: Optional[bool] = None, exclusions=None) -> int:
     budget = getattr(args, "_solve_budget", None)
     fetched = list(urls if fetched is None else fetched)
-    selection = {"mode": "urls", "urls": urls, "posts": int(getattr(args, "posts", 0) or 0),
-                 "max_results": args.max_results}
+    selection = run_state.selection(args, urls)
     extra = {"solves_spent": budget.spent if budget is not None else 0, "selection": selection,
-             "failed_urls": failures or [], "not_found_urls": not_found or []}
+             "failed_urls": failures or [], "not_found_urls": not_found or [],
+             "excluded_urls": exclusions or [], "incremental": bool(getattr(args, "incremental_from", None)),
+             "post_window": "embedded_pinned_first" if getattr(args, "posts", 0) else None,
+             # A post's date never changes, so one before --since stays excluded:
+             # remembering it spares the next delta a fetch that only drops it.
+             "seen_post_skus": sorted(set(getattr(args, "_known_posts", set())) |
+                                      {p.sku for p in products if p.category == "post" and p.sku} |
+                                      {_post_sku(e["url"]) for e in exclusions or []
+                                       if e["reason"] == "before_since" and _post_sku(e["url"])})}
     return _finish_run(
         products=products, out_path=args.out, fmt=args.format, engine=engine_name, url=urls[0] if urls else "",
         pages_requested=len(fetched), pages_completed=pages_completed,
         failed_pages=failed_pages or None, blocked=blocked, remote_api_error=remote_api_error,
         allow_empty=args.allow_empty, started_at=started_at, price_confirmed_pct=None,
         max_results=args.max_results, rate_limited=rate_limited,
-        incomplete_reason=next((f["reason"] for f in (failures or []) if f["reason"] == "parse_error"), None),
-        capped=bool(capped) if capped is not None else len(urls) > args.max_results,
+        incomplete_reason=next((f["reason"] for f in (failures or []) if f["reason"] in ("parse_error", "proxy_pool_exhausted")), None),
+        capped=bool(capped) if capped is not None else len(urls) > args.max_results or bool(getattr(args, "posts", 0)),
         extra_meta=extra,
     )
 
@@ -374,5 +428,10 @@ def validate_common(args, *, urls, skipped, print_err) -> Optional[int]:
         return EXIT_BAD_USAGE
     if not 0 <= int(getattr(args, "posts", 0) or 0) <= MAX_TIMELINE_POSTS:
         print_err(f"Error: --posts must be between 0 and {MAX_TIMELINE_POSTS} — a logged-out profile page embeds only its first {MAX_TIMELINE_POSTS} posts")
+        return EXIT_BAD_USAGE
+    try:
+        run_state.prepare(args, urls)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        print_err(f"Error: {_redact(str(exc))}")
         return EXIT_BAD_USAGE
     return None

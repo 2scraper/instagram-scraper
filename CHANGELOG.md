@@ -8,6 +8,20 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+### Added
+
+- Add configurable profile/post metric and text diffs, numeric deltas, and JSON/CSV normalization.
+- Add inclusive UTC `--since` filtering without stopping at older pinned posts.
+- Add `--incremental-from` with validated snapshot hashes and accumulated seen-post IDs (posts dropped by `--since` included, so a delta does not refetch them).
+- Add atomic `--checkpoint` and `--resume`, preserving successful rows and discovered queue order.
+
+### Changed
+
+- Count HTTP 200 login walls against proxies; stop when the proxy pool is exhausted without direct fallback.
+- Report missing/malformed timelines as partial and rolling post windows as selections, not deletions.
+- Read JSON script blocks independently of HTML attribute order and route whitespace.
+- Exercise monitoring and interruption scenarios in CI and Docker tests; ship the new run_state module in the wheel/image.
+
 ## [0.1.0] - 2026-10-04
 
 First release.

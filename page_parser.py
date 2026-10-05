@@ -76,6 +76,7 @@ from typing import Any, Iterator, List, Optional
 from urllib.parse import urlparse
 
 from output_writer import Product
+from bs4 import BeautifulSoup
 
 log = logging.getLogger("page_parser")
 
@@ -89,7 +90,7 @@ ROUTE_PROFILE = "comet.igweb.PolarisLoggedOutDesktopWWWProfileRoute"
 ROUTE_POST = "comet.igweb.PolarisLoggedOutDesktopWWWPostRoute"
 ROUTE_ERROR = "comet.igweb.PolarisErrorRoute"
 ROUTE_LOGIN = "comet.igweb.PolarisCAAIGLoginHomepageRoute"
-_ROUTE_RE = re.compile(r'"canonicalRouteName":"([A-Za-z0-9_.]+)"')
+_ROUTE_RE = re.compile(r'"canonicalRouteName"\s*:\s*"([A-Za-z0-9_.]+)"')
 
 # No captcha or bot-challenge vendor was met on any logged-out capture:
 # Instagram answers a visitor it distrusts with its own login page (above),
@@ -98,7 +99,6 @@ _ROUTE_RE = re.compile(r'"canonicalRouteName":"([A-Za-z0-9_.]+)"')
 # generic set matches nothing on a real profile or post page.
 BOT_CHALLENGE_MARKERS: tuple = ()
 
-_JSON_SCRIPT_RE = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.S)
 
 # Usernames: letters, digits, `.` and `_`, at most 30 characters.
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
@@ -204,7 +204,8 @@ def json_blocks(html: str) -> List[Any]:
     that does not decode is skipped: the shell carries a few non-data
     blocks, and one bad block must not hide the others."""
     out = []
-    for raw in _JSON_SCRIPT_RE.findall(html or ""):
+    for script in BeautifulSoup(html or "", "html.parser").find_all("script", type="application/json"):
+        raw = script.string or script.get_text()
         try:
             out.append(json.loads(raw))
         except ValueError:
@@ -349,6 +350,27 @@ def timeline_shortcodes(html: str, *, user_pk: Optional[str] = None) -> List[str
     return codes
 
 
+def timeline_state(html: str, *, user_pk: Optional[str], private: bool = False) -> str:
+    """Distinguish a genuine empty/private timeline from missing or malformed data."""
+    if private:
+        return "private"
+    found = False
+    for user in _find_all(html, "xig_user_by_username"):
+        if user_pk is not None and str(user.get("pk")) != str(user_pk):
+            continue
+        if "polaris_ordered_timeline_connection" not in user:
+            continue
+        found = True
+        conn = user["polaris_ordered_timeline_connection"]
+        if not isinstance(conn, dict) or not isinstance(conn.get("edges"), list):
+            return "malformed"
+        for edge in conn["edges"]:
+            node = edge.get("node") if isinstance(edge, dict) else None
+            if not isinstance(node, dict) or not isinstance(node.get("code"), str) or not _SHORTCODE_RE.fullmatch(node["code"]):
+                return "malformed"
+    return "present" if found else "missing"
+
+
 def parse_profile(html: str, *, username: str) -> Optional[Product]:
     user = _profile_user(html, username)
     if user is None:
@@ -457,6 +479,7 @@ class PageResult:
     source_used: str  # "embedded_json" | "none"
     route: Optional[str] = None
     gated: bool = False
+    timeline_status: Optional[str] = None
     post_codes: Optional[List[str]] = None  # a profile's timeline, for --posts
 
 
@@ -469,7 +492,8 @@ def parse_page(html: str, *, url: str) -> PageResult:
         product = parse_profile(html, username=key)
         if product is not None:
             codes = json.loads(product.recent_posts_json) if product.recent_posts_json else []
-            return PageResult([product], "embedded_json", route, post_codes=codes)
+            return PageResult([product], "embedded_json", route, post_codes=codes,
+                              timeline_status=timeline_state(html, user_pk=product.user_id, private=bool(product.is_private)))
     elif kind == "post" and route == ROUTE_POST:
         product = parse_post(html, shortcode=key)
         if product is not None:
