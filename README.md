@@ -20,7 +20,7 @@ page embeds (up to 12, pinned posts first).
   visitor: the data the site embeds in the page itself. No password, no
   session, nothing that can get an account banned.
 - **Verified live on 2026-10-04**, from an ordinary residential IP with no
-  key and no proxy: a profile and its 12 latest posts, 13 of 13 pages read;
+  key and no proxy: a profile and the 12 posts its page embeds, 13 of 13 pages read;
   a 29-page mixed run (two profiles, a Reel, 24 posts, a dead username and a
   dead shortcode) read 27 rows and reported the two dead ones as not found.
   All three engines were run live, and Playwright and Puppeteer again

@@ -24,8 +24,8 @@ Then, the same day, with a 2Captcha key and an EU residential proxy:
 | `--scraper-api`, invalid key | 2 URLs | exit 5 after one call |
 
 **10-run sweep, 2026-10-04**: Playwright ×6 (3 direct, 3 via proxy),
-Puppeteer ×2, Selenium ×1, Scraper API ×1, each a profile and its 2
-latest posts. 9 runs complete (25 pages, one of them the private `@vogue`
+Puppeteer ×2, Selenium ×1, Scraper API ×1, each a profile and its first 2
+timeline posts. 9 runs complete (25 pages, one of them the private `@vogue`
 profile), the Scraper API run blocked by the login page. No captcha of any
 kind on any of the 26 pages; the only vendor string found, `arkose_captcha`,
 is a cookie-consent list entry.

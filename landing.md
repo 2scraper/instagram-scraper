@@ -2,7 +2,7 @@
 
 **Open-source scraper for public Instagram profiles, posts and Reels — no login, three engines, JSON or CSV.**
 
-Pull a profile's name, bio, links, follower and following counts, verified and private flags, and its 12 most recent posts — or any post or Reel by URL: date, likes, comments, caption, hashtags, mentions, co-authors, tagged accounts and every image or video URL of a carousel.
+Pull a profile's name, bio, links, follower and following counts, verified and private flags, and the 12 posts its page shows (pinned first) — or any post or Reel by URL: date, likes, comments, caption, hashtags, mentions, co-authors, tagged accounts and every image or video URL of a carousel.
 
 [**View source on GitHub →**](https://github.com/2scraper/instagram-scraper)
 
@@ -14,15 +14,16 @@ Instagram's `robots.txt` disallows crawlers, and Meta's terms forbid automated c
 
 ## What to expect
 
-Every row comes from the data Instagram embeds in the page itself, not from the rounded preview text ("268M Followers"). Live-verified on 2026-10-04 from an ordinary residential IP, with no key and no proxy: a profile and its 12 latest posts, 13 of 13 pages read; a 29-page mixed run with a dead username and a dead shortcode, both reported as not found. Playwright, Puppeteer and Selenium were all run live. Instagram limits logged-out reading per client; a throttled run says so (blocked, `rate_limited`) instead of returning an empty profile. Details in the [README](https://github.com/2scraper/instagram-scraper#readme).
+Every row comes from the data Instagram embeds in the page itself, not from the rounded preview text ("268M Followers"). Live-verified on 2026-10-04 from an ordinary residential IP, with no key and no proxy: a profile and the 12 posts its page embeds, 13 of 13 pages read; a 29-page mixed run with a dead username and a dead shortcode, both reported as not found. Playwright, Puppeteer and Selenium were all run live. Instagram limits logged-out reading per client; a throttled run says so (blocked, `rate_limited`) instead of returning an empty profile. Details in the [README](https://github.com/2scraper/instagram-scraper#readme).
 
 ## What you get
 
 - Free, open-source scraper, one script per engine — **Playwright** (recommended), **Puppeteer** (via pyppeteer) and **Selenium**, all producing the identical output schema and exit codes
-- Usernames, profile URLs, post and Reel URLs — one at a time or a batch from a file; `--posts N` adds a profile's N most recent posts (up to the 12 a logged-out page shows)
-- Profile fields: name, bio, bio links, followers, following, verified, private, the 12 latest post shortcodes
+- Usernames, profile URLs, post and Reel URLs — one at a time or a batch from a file; `--posts N` adds the first N of the 12 posts a logged-out profile page shows, pinned first
+- Profile fields: name, bio, bio links, followers, following, verified, private, the shortcodes of the 12 posts the page shows
 - Post fields: date, likes (or a flag when hidden), comments count, caption, hashtags, mentions, alt text, co-authors, tagged accounts, media type, every carousel slide's URL, video URL, size
 - JSON and CSV export, with a documented `Product` schema and a `.meta.json` sidecar on every completed/partial run
+- Change monitoring: `diff_runs.py` shows follower, like, comment and caption changes between two runs; `--since` and `--incremental-from` collect only new posts; `--checkpoint` / `--resume` finish an interrupted run (new in 0.2.0, tested offline so far)
 - A browserless mode (`--scraper-api`) that needs no browser driver installed
 - A failed URL never hides the ones that succeeded: the sidecar lists every failed URL with its reason, and dead usernames separately
 
