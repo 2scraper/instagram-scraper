@@ -18,7 +18,7 @@ that changes a default is called out at the top of its entry.
 ### Changed
 
 - Count HTTP 200 login walls against proxies; stop when the proxy pool is exhausted without direct fallback.
-- Report missing/malformed timelines as partial and rolling post windows as selections, not deletions.
+- Report missing/malformed timelines as partial (a single timeline item without a post code is skipped with a warning) and rolling post windows as selections, not deletions; a row whose URL the new run found gone is still `removed`.
 - Read JSON script blocks independently of HTML attribute order and route whitespace.
 - Exercise monitoring and interruption scenarios in CI and Docker tests; ship the new run_state module in the wheel/image.
 

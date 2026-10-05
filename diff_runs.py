@@ -128,7 +128,12 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False, f
 
     added = sorted(new_skus - old_skus)
     missing = sorted(old_skus - new_skus)
-    removed, left_selection = ([], missing) if capped else (missing, [])
+    # In a capped run a missing row may only have fallen out of the window,
+    # unless the new run itself found its URL gone (a deleted or renamed
+    # profile, a deleted post): that is a real removal.
+    gone = set(new_meta.get("not_found_urls") or [])
+    removed = [sku for sku in missing if not capped or old_rows[sku].get("product_url") in gone]
+    left_selection = [sku for sku in missing if sku not in removed]
     changed, source_changed, currency_changed, field_changes = [], [], [], []
 
     for sku in sorted(old_skus & new_skus):

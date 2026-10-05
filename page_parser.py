@@ -351,7 +351,10 @@ def timeline_shortcodes(html: str, *, user_pk: Optional[str] = None) -> List[str
 
 
 def timeline_state(html: str, *, user_pk: Optional[str], private: bool = False) -> str:
-    """Distinguish a genuine empty/private timeline from missing or malformed data."""
+    """Distinguish a genuine empty/private timeline from missing or malformed
+    data. A broken connection is malformed; a single edge without a post code
+    (say, an inserted non-post item) is skipped, as timeline_shortcodes does,
+    so one odd node does not turn every --posts run partial."""
     if private:
         return "private"
     found = False
@@ -367,7 +370,7 @@ def timeline_state(html: str, *, user_pk: Optional[str], private: bool = False) 
         for edge in conn["edges"]:
             node = edge.get("node") if isinstance(edge, dict) else None
             if not isinstance(node, dict) or not isinstance(node.get("code"), str) or not _SHORTCODE_RE.fullmatch(node["code"]):
-                return "malformed"
+                log.warning("Skipping a timeline item without a post code for user %s", user.get("pk"))
     return "present" if found else "missing"
 
 

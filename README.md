@@ -253,7 +253,8 @@ returns 1 for monitored changes or membership changes, including
 
 Post windows are limited (`--posts`, pinned first, at most 12 available), so
 a post missing from the next window is `left_selection`, not proof of
-deletion. Incompatible selections, partial runs and mismatched output hashes
+deletion. A profile or post whose URL the new run reports as not found
+is `removed`. Incompatible selections, partial runs and mismatched output hashes
 are refused. Incremental delta outputs are not full snapshots and cannot be
 used with diff; use normal runs when monitoring engagement changes.
 

@@ -83,6 +83,16 @@ class Monitoring(unittest.TestCase):
         eng = Engine({USER: PROFILE.replace('polaris_ordered_timeline_connection', 'unknown_timeline')})
         code, meta, rows, _ = self.run_flow(self.args('--posts', '2'), [USER], eng)
         self.assertEqual((code, meta['stop_reason'], len(rows)), (6, 'parse_error', 1))
+    def test_one_odd_timeline_item_is_skipped(self):
+        # An edge whose node has no post code: the other posts still read, the run is complete.
+        page = PROFILE.replace('timeline_connection":{"edges":[', 'timeline_connection":{"edges":[{"node":{"__typename":"XDTAdItem"}},', 1)
+        self.assertNotEqual(page, PROFILE)
+        result = parser.parse_page(page, url=USER)
+        self.assertEqual(result.timeline_status, 'present')
+        first = result.post_codes[0]
+        code, meta, rows, _ = self.run_flow(self.args('--posts', '1'), [USER],
+                                            Engine({USER: page, parser.post_url(first): POST.replace(CODE, first)}))
+        self.assertEqual((code, meta['status']), (0, 'complete'))
     def test_attribute_order_and_route_whitespace(self):
         body = PROFILE.replace('<script type="application/json"', '<script data-x="1" type="application/json"')
         body = body.replace('"canonicalRouteName":', '"canonicalRouteName" : ')
@@ -214,6 +224,15 @@ class Monitoring(unittest.TestCase):
         result=diff_runs.diff(a.out,b.out)
         self.assertEqual(result['removed'],[])
         self.assertEqual(result['left_selection'],['instagram-post-'+CODE])
+    def test_not_found_profile_is_removed_in_post_window(self):
+        a=self.args('--posts','1',name='a');b=self.args('--posts','1',name='b')
+        profile=parser.parse_page(PROFILE,url=USER).products[0]
+        post=parser.parse_page(POST,url=P1).products[0]
+        common=dict(blocked=False,remote_api_error=False,engine_name='test',urls=[USER,P1],started_at=0,failed_pages=[])
+        flow.finish(a,products=[profile,post],pages_completed=2,**common)
+        flow.finish(b,products=[post],pages_completed=2,not_found=[USER],**common)
+        result=diff_runs.diff(a.out,b.out)
+        self.assertEqual((result['removed'],result['left_selection']),([profile.sku],[]))
     def test_flags_on_all_engines(self):
         for engine in (playwright,puppeteer,selenium):
             args=engine.build_arg_parser().parse_args(['--url','natgeo','--since','2026-10-01','--checkpoint','state.json','--resume'])
