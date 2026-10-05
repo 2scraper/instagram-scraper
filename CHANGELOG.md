@@ -10,6 +10,10 @@ that changes a default is called out at the top of its entry.
 
 ## [0.2.0] - 2026-10-05
 
+Monitoring and repeat runs. Everything new here is tested offline, on
+pages captured live on 2026-10-04; none of it has been run against live
+Instagram yet.
+
 Changes an existing user will notice:
 
 - `diff_runs.py --fail-on-change` now exits 1 on monitored field changes
@@ -25,17 +29,31 @@ Changes an existing user will notice:
 
 ### Added
 
-- Add configurable profile/post metric and text diffs, numeric deltas, and JSON/CSV normalization.
-- Add inclusive UTC `--since` filtering without stopping at older pinned posts.
-- Add `--incremental-from` with validated snapshot hashes and accumulated seen-post IDs (posts dropped by `--since` included, so a delta does not refetch them).
-- Add atomic `--checkpoint` and `--resume`, preserving successful rows and discovered queue order.
+- `diff_runs.py` compares the fields that matter on Instagram (followers,
+  following, likes, comments, caption, biography, full name, verified,
+  private, hidden likes) with old and new values and a `delta` for
+  numbers; `--fields` picks which. JSON and CSV runs can be compared.
+- `--since DATE`: keep only posts from that date or time on (inclusive,
+  UTC by default). Profiles are always kept, and an older pinned post does
+  not hide newer ones.
+- `--incremental-from RUN`: refresh profiles and open only the posts an
+  earlier complete run did not have. Each run records the posts seen
+  before it (`seen_post_skus`), including those dropped by `--since`, so
+  runs can be chained.
+- `--checkpoint PATH` / `--resume`: save progress after each URL and finish
+  an interrupted or partial run without reading the finished URLs again.
 
 ### Changed
 
-- Count HTTP 200 login walls against proxies; stop when the proxy pool is exhausted without direct fallback.
-- Report missing/malformed timelines as partial (a single timeline item without a post code is skipped with a warning) and rolling post windows as selections, not deletions; a row whose URL the new run found gone is still `removed`.
-- Read JSON script blocks independently of HTML attribute order and route whitespace.
-- Exercise monitoring and interruption scenarios in CI and Docker tests; ship the new run_state module in the wheel/image.
+- A `--posts` run whose profile page has no readable timeline is now
+  partial (`parse_error`) instead of returning the profile without posts.
+  A single timeline item without a post code is skipped with a warning.
+
+### Fixed
+
+- The page's JSON blocks are found whatever the order of the `<script>`
+  tag's attributes, and the page route is recognised with whitespace in
+  its JSON.
 
 ## [0.1.0] - 2026-10-04
 
