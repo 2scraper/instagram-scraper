@@ -8,6 +8,21 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
+Changes an existing user will notice:
+
+- `diff_runs.py --fail-on-change` now exits 1 on monitored field changes
+  (followers, likes, captions and the rest) and on rows added, removed or
+  leaving the post window, not only on price changes.
+- With `--posts`, a post missing from the next run is `left_selection`, not
+  `removed`; a row whose URL the new run reports as not found is `removed`.
+- An exhausted `--proxy-file` / `--proxy` pool stops the run
+  (`stop_reason: proxy_pool_exhausted`) instead of continuing direct, and a
+  login wall under HTTP 200 now counts against the proxy.
+- Exit 4 also covers runs where every post was filtered by `--since` or
+  already collected by `--incremental-from`.
+
 ### Added
 
 - Add configurable profile/post metric and text diffs, numeric deltas, and JSON/CSV normalization.
