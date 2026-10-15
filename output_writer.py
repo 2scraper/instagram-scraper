@@ -2,11 +2,7 @@
 """output_writer.py — the row model, JSON/CSV writer, dedupe, exit codes,
 and run metadata. Carries (almost) no site knowledge: everything here is
 part of the family's shared output CONTRACT — diverging from it needs a
-written reason, not a per-site tweak. Ported near-verbatim from
-lidl-scraper's output_writer.py (CLAUDE.md §7: porting starts by copying
-the family-shared modules from the newest sibling and diffing what
-changed on purpose) — in turn ported from skyscanner-scraper's, in turn
-from stockx-scraper's original (commit 00b5570). The exit codes,
+written reason, not a per-site tweak. The exit codes,
 STATUS_BY_EXIT map, and finish_run() outcome-precedence logic are
 IDENTICAL to every prior family member on purpose, including the fix
 from a 2026-09-15 audit that found `blocked`/`remote_api_error` were
@@ -16,9 +12,12 @@ family-common fields) differs per repo.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import json
+import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -62,7 +61,7 @@ class Product:
     One row is one PROFILE or one POST, told apart by `category` — a
     profile URL with `--posts N` yields both kinds in one run, so a second
     dataclass would split one run across two files. The family prefix is
-    kept byte-identical (CLAUDE.md §9); what the commerce fields mean here:
+    kept byte-identical; what the commerce fields mean here:
 
     - `sku`: `instagram-user-{pk}` (the numeric account id survives a
       username change) or `instagram-post-{shortcode}`.
@@ -99,7 +98,7 @@ class Product:
     for a logged-out visitor, and `og:description` rounds it to "32K"),
     a Reel's play count (not in the logged-out media object at all), a
     location (`location` was null on 36 of 36 posts, including 12 from a
-    travel account — CLAUDE.md §9: a column null on every row must not
+    travel account — a column null on every row must not
     exist; add it back with a capture that has one), and comments (see
     page_parser.py).
     """
@@ -182,24 +181,108 @@ def merge_pages(pages: Sequence[Sequence[Product]]) -> List[Product]:
 # --------------------------------------------------------------------------- #
 # Writers
 # --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def _atomic(path: str, newline: Optional[str] = None):
+    """Write to a temporary file beside `path`, then rename over it.
+
+    `open(path, "w")` truncates before a single byte is written, so a crash,
+    a kill or a full disk halfway through `json.dump` would leave a shorter,
+    invalid file where the previous good output was. The previous run must
+    survive a failed attempt to replace it — and the sidecar most of all,
+    because it is the file a consumer branches on.
+
+    * The temp file lives in the target's own directory: `os.replace` is
+      atomic only within one filesystem.
+    * `fsync` before the rename makes the bytes durable, not just visible.
+    * `newline` is passed through because the csv module needs
+      `newline=""`.
+    * Mode: `NamedTemporaryFile` creates at 0600 and `os.replace` keeps
+      that, so the mode is set explicitly — an existing target keeps its
+      own mode (it may have been tightened on purpose), and a new one gets
+      `0o666 & ~umask`, exactly what `open()` would have given it.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, dir=directory,
+        prefix=os.path.basename(path) + ".", suffix=".tmp", delete=False)
+    try:
+        with handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(handle.name, mode)
+        os.replace(handle.name, path)
+    except BaseException:
+        # Including KeyboardInterrupt: never leave `out.json.xyz.tmp` behind.
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+# A spreadsheet treats a cell beginning with one of these as a FORMULA.
+# Captions, biographies, display names and alt text are all written by
+# whoever owns the account, so `=HYPERLINK(...)` or `+cmd|...` in a caption
+# would execute when the CSV is opened. The tab and newlines are here
+# because some readers strip a leading one and evaluate what follows.
+CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
+# Excel, Sheets and LibreOffice read a leading apostrophe as "text" and do
+# not display it; a `csv`-module consumer does see it, which is why the
+# count is recorded in the sidecar as `csv_cells_escaped`.
+CSV_FORMULA_ESCAPE = "'"
+
+
+def _csv_escape(value):
+    """Neutralise a formula-shaped STRING cell. Returns (value, escaped).
+
+    Numbers are never touched (turning -5 into text breaks every sum), and
+    the JSON output keeps the site's bytes unchanged — only the CSV differs.
+    Applied to the final cell value, so the `*_json` columns (already
+    serialised strings) are covered too.
+    """
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_LEADS):
+        return CSV_FORMULA_ESCAPE + value, True
+    return value, False
+
+
 def write_json(products: Sequence[Product], out_path: str) -> None:
-    with open(out_path, "w", encoding="utf-8") as f:
+    with _atomic(out_path) as f:
         json.dump([asdict(p) for p in products], f, ensure_ascii=False, indent=2)
 
 
-def write_csv(products: Sequence[Product], out_path: str) -> None:
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
+def write_csv(products: Sequence[Product], out_path: str) -> int:
+    """Write the CSV and return how many cells were formula-escaped."""
+    escaped = 0
+    with _atomic(out_path, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=PRODUCT_FIELD_NAMES)
         writer.writeheader()  # written even for zero rows — a consumer reads
         for p in products:    # an empty table, not a zero-byte file.
-            writer.writerow(asdict(p))
+            row = {}
+            for k, v in asdict(p).items():
+                if isinstance(v, (list, tuple, dict)):
+                    # Serialise first, escape second: a serialised list is a
+                    # string too and can start with a formula character.
+                    v = json.dumps(v, ensure_ascii=False)
+                row[k], was = _csv_escape(v)
+                escaped += was
+            writer.writerow(row)
+    return escaped
 
 
-def write_output(products: Sequence[Product], out_path: str, fmt: str) -> None:
+def write_output(products: Sequence[Product], out_path: str, fmt: str) -> Optional[int]:
+    """Write rows; for CSV return the number of formula-escaped cells."""
     if fmt == "json":
         write_json(products, out_path)
+        return None
     elif fmt == "csv":
-        write_csv(products, out_path)
+        return write_csv(products, out_path)
     else:
         raise ValueError(f"Unsupported format: {fmt!r} (expected 'json' or 'csv')")
 
@@ -242,18 +325,15 @@ def write_meta(
     }
     if extra:
         meta.update(extra)
-    Path(meta_path_for(out_path)).write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    with _atomic(meta_path_for(out_path)) as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
 # --------------------------------------------------------------------------- #
 # finish_run — the single place every engine calls to decide exit code,
 # whether to write output at all, and whether to write a sidecar. Keeping
 # this in one shared function is what stops the three engines' exit-code
-# mapping from drifting apart. Structurally identical to stockx-scraper's
-# post-audit-fix finish_run() (commit 00b5570) — see that file's comment
-# for the full incident writeup this precedence order fixes.
+# mapping from drifting apart.
 # --------------------------------------------------------------------------- #
 def finish_run(
     *,
@@ -295,7 +375,7 @@ def finish_run(
     # blocked partway through.
     #
     # Rows gathered by a run that did NOT finish cleanly are `partial` (6),
-    # with the cause in `stop_reason` (CLAUDE.md §25: exit 5 and exit 3
+    # with the cause in `stop_reason` (exit 5 and exit 3
     # promise no file; 6 means "some rows, incomplete"). Audit 2026-09-30:
     # this used to return 5 or 3 AND write the rows, so a consumer keyed on
     # the exit code threw away good data. `rejected_rows` counts records
@@ -313,7 +393,7 @@ def finish_run(
                        or ("failed_pages" if failed_pages and not blocked and not remote_api_error else status))
     elif remote_api_error or blocked or partial or rejected_rows:
         status, exit_code = "partial", EXIT_PARTIAL
-        # A throttle is not a block (CLAUDE.md §24): "blocked" sends the
+        # A throttle is not a block: "blocked" sends the
         # reader to buy a proxy, "rate_limited" to slow down.
         stop_reason = ("remote_api_error" if remote_api_error else "rate_limited" if rate_limited and blocked
                        else "blocked" if blocked else incomplete_reason or ("failed_pages" if partial else "rejected_rows"))
@@ -333,8 +413,13 @@ def finish_run(
     if zero_products and not allow_empty:
         return exit_code
 
-    write_output(products, out_path, fmt)
-    extra = dict(extra_meta or {})
+    escaped = write_output(products, out_path, fmt)
+    extra = {}
+    if escaped is not None:
+        # Under the caller's extra, never over it: housekeeping must not
+        # silently replace a value the engine chose to record.
+        extra["csv_cells_escaped"] = escaped
+    extra.update(extra_meta or {})
     if rejected_rows:
         extra["rejected_rows"] = rejected_rows
     # What diff_runs needs to refuse a meaningless comparison: the cap the

@@ -4,9 +4,8 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import os
+import os  # tests patch run_state.os.replace (the same module object _atomic uses)
 from pathlib import Path
-import tempfile
 
 from output_writer import Product
 
@@ -37,19 +36,11 @@ def selection(args, urls):
 
 
 def atomic_json(path, data):
-    target = Path(path)
-    temp = None
-    try:
-        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent,
-                                         prefix=target.name + '.', suffix='.tmp', delete=False) as stream:
-            temp = Path(stream.name)
-            json.dump(data, stream, ensure_ascii=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, target)
-    finally:
-        if temp is not None and temp.exists():
-            temp.unlink()
+    """The same atomic writer the outputs use (temp file beside the target,
+    fsync, os.replace, umask-honouring mode)."""
+    from output_writer import _atomic
+    with _atomic(str(path)) as stream:
+        json.dump(data, stream, ensure_ascii=False, indent=2)
 
 
 def prepare(args, urls):

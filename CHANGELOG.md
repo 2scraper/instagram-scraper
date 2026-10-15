@@ -8,6 +8,45 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+> **Behaviour changes.** CSV output now prefixes a leading apostrophe to any
+> text cell that starts with `=`, `+`, `-`, `@`, a tab, CR or LF, so a
+> spreadsheet does not run a caption or bio as a formula; the sidecar records
+> how many cells were changed as `csv_cells_escaped`. JSON output is
+> unchanged. Selenium and pyppeteer now reject a negative `--retries`,
+> `--retry-delay`, `--delay-between-pages`, `--max-solves` or
+> `--proxy-block-retries` with exit 2, as Playwright already did (Playwright
+> now also rejects a negative `--proxy-block-retries`). An `INSTAGRAM_URL`
+> in `.env` or the environment no longer replaces a `--urls-file` typed on
+> the command line.
+
+### Fixed
+
+- Output, sidecar and checkpoint files are written atomically (a temporary
+  file beside the target, fsync, rename). A crash or full disk during a
+  write used to leave a truncated, invalid file where the previous good
+  output had been. New files get the usual `0o666 & ~umask` mode, and an
+  existing file keeps its own mode.
+- `INSTAGRAM_URL` silently overrode a typed `--urls-file`, so the run read a
+  different account than the one asked for. It is now ignored, with a log
+  line, when `--urls-file` is given.
+- A paid captcha solve is limited to one per URL as well as by
+  `--max-solves` for the run, and both limits are checked before anything
+  is bought.
+- The credential scan now also reads `smoke_test.py`, untracked `.env.*`
+  copies such as `.env.bak`, and flags a bare 32-hex value anywhere.
+- `Bearer` tokens are masked in redacted error text.
+- The Scraping Browser 401 message no longer claims the credentials last
+  about a day; how long they last varies.
+- The Playwright `--fp-tags` help example is a single OS tag (`Windows`), as
+  in the other two engines.
+- The live canary no longer skips green without the `INSTAGRAM_PROXY`
+  secret: it runs direct from the GitHub runner and goes red if the site
+  was not read, naming the missing secret. Its first run (2026-10-15) was
+  refused from the runner with Instagram's login page, so it stays red until
+  the secret is set.
+- Comments describe this repo's own rules instead of pointing at internal
+  notes or other projects.
+
 ## [0.2.0] - 2026-10-05
 
 Monitoring and repeat runs. Everything new here is tested offline, on

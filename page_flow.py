@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """page_flow.py — what one fetched Instagram URL MEANS, decided once for
-all engines (CLAUDE.md §1: three copies of this triage would drift, and the
+all engines (three copies of this triage would drift, and the
 drift would be silent — one engine reporting exit 3 where its twin reports
 0 on the same page).
 
@@ -110,7 +110,7 @@ def decide(*, url: str, http_status: Optional[int], html: str) -> Outcome:
 
 
 # --------------------------------------------------------------------------- #
-# The ONE fetch loop (CLAUDE.md §26). Each engine passes an `Engine` (open a
+# The ONE fetch loop. Each engine passes an `Engine` (open a
 # page session, sleep, solve a generic captcha) whose sessions provide NAMED
 # operations — goto, content, wait, close — and no JavaScript crosses this
 # boundary.
@@ -143,9 +143,44 @@ class Engine(_Protocol):
     async def solve_captcha(self, session: PageSession, *, html: str, url: str) -> Optional[dict]: ...
 
 
+# At most this many PAID solves for one URL, across every attempt at it.
+# Checked BEFORE each purchase alongside the run-wide --max-solves cap, and
+# never reset by a navigation retry or a proxy rotation: a fresh attempt is
+# a reason to re-fetch, not a fresh allowance.
+SOLVES_PER_PAGE = 1
+
+
+# CLI value validators, shared so the three engines cannot disagree about
+# what a flag accepts. --retries counts EXTRA attempts here, so 0 is legal
+# (one fetch) and only a negative value is a usage error.
+def positive_int(value: str) -> int:
+    import argparse
+    ivalue = int(value)
+    if ivalue < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer (got {value!r})")
+    return ivalue
+
+
+def nonnegative_int(value: str) -> int:
+    import argparse
+    ivalue = int(value)
+    if ivalue < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
+    return ivalue
+
+
+def nonnegative_float(value: str) -> float:
+    import argparse
+    fvalue = float(value)
+    if fvalue < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (got {value!r})")
+    return fvalue
+
+
 class SolveBudget:
-    """One cap on PAID captcha solves for the whole run (CLAUDE.md §23: a
-    per-page limit nothing sums is a bill). `limit=0` means never pay."""
+    """A cap on PAID captcha solves. One instance spans the whole run
+    (`--max-solves`), and fetch_item makes one per URL (SOLVES_PER_PAGE):
+    a cap that nothing sums is a bill. `limit=0` means never pay."""
 
     def __init__(self, limit: int):
         self.limit = max(0, int(limit))
@@ -189,14 +224,22 @@ def _dump_path(out_path: str, index: int) -> str:
     return f"{_Path(out_path).with_suffix('')}_debug_{index}.html"
 
 
-async def _solve_within_budget(engine: Engine, session: PageSession, args, *, html: str, url: str) -> Optional[dict]:
+async def _solve_within_budget(engine: Engine, session: PageSession, args, *, html: str, url: str,
+                               page_budget: SolveBudget) -> Optional[dict]:
+    """The ONLY place page_flow may call engine.solve_captcha: both the
+    per-URL allowance and the run-wide cap are checked before a purchase."""
     budget = getattr(args, "_solve_budget", None)
+    if page_budget.remaining() == 0:
+        _log.warning("Captcha solving skipped for %s: its per-page solve allowance (%d) is spent.", url, page_budget.limit)
+        return None
     if budget is not None and budget.remaining() == 0:
         _log.warning("Captcha solving skipped: the run's solve budget is spent (--max-solves %d).", budget.limit)
         return None
     result = await engine.solve_captcha(session, html=html, url=url)
-    if budget is not None and result and result.get("action") in ("solved", "warning_solver_error"):
-        budget.spend()  # a task was created and billed, whatever came back
+    if result and result.get("action") in ("solved", "warning_solver_error"):
+        page_budget.spend()  # a task was created and billed, whatever came back
+        if budget is not None:
+            budget.spend()
     return result
 
 
@@ -207,6 +250,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
     proxy = proxy_pool.next() if proxy_pool is not None else None
     if proxy_pool is not None and proxy is None:
         return Outcome(None, False, False, "none", failure="proxy_pool_exhausted")
+    page_budget = SolveBudget(SOLVES_PER_PAGE)
     _log.info("Fetching %s (proxy: %s)", url, proxy.masked() if proxy else "(none — direct, or the --cdp-endpoint session's own exit)")
     try:
         session = await engine.open(proxy)
@@ -248,7 +292,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
         if waited and not is_challenge(html):
             _log.info("%s: challenge cleared by itself after %.0fs.", url, waited)
         if is_challenge(html) and args.solve_captcha != "off":
-            result = await _solve_within_budget(engine, session, args, html=html, url=url)
+            result = await _solve_within_budget(engine, session, args, html=html, url=url, page_budget=page_budget)
             if result and result.get("action") == "solved":
                 await session.wait(engine.readiness_s)
                 html = await session.content()
@@ -258,7 +302,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
             _log.warning("%s", message)
         if proxy_pool is not None and proxy is not None:
             if outcome.blocked:
-                # A login wall is a property of the EXIT (CLAUDE.md §8: a
+                # A login wall is a property of the EXIT (a
                 # rotation is a fresh browser), so count it against the proxy.
                 proxy_pool.report_failure(proxy, dead=True)
             else:

@@ -189,8 +189,8 @@ def is_proxy_dead_error(message: str) -> bool:
 
 # --------------------------------------------------------------------------- #
 # Redacting a credential OUT OF an arbitrary string — not the Proxy dataclass
-# above, but a driver/HTTP library's own exception message. CLAUDE.md §8:
-# "an EXCEPTION MESSAGE is a log" — Playwright's connect_over_cdp repeats a
+# above, but a driver/HTTP library's own exception message. An exception
+# message is a log too — Playwright's connect_over_cdp repeats a
 # failed ws:// endpoint (login:password embedded) up to five times in one
 # error (message + a four-line call log), and `requests` puts the full URL,
 # query string included, into every HTTPError/connection-error message. Any
@@ -202,6 +202,9 @@ def is_proxy_dead_error(message: str) -> bool:
 # login AND password into the exception's "Call log" four times over.
 _URL_CREDENTIAL_RE = re.compile(r"(?P<scheme>\w+://)[^\s/@]+@")
 _KEY_PARAM_RE = re.compile(r"(?i)\b((?:client)?key|token|api[_-]?key)=[^&\s'\"]+")
+# The Scraper API authenticates with `Authorization: Bearer <key>`. No code
+# path logs request headers today; masking it here keeps a future one safe.
+_BEARER_RE = re.compile(r"(?i)\b(Bearer)\s+[^\s'\",;]+")
 
 
 def redact_credentials(text: str) -> str:
@@ -216,4 +219,5 @@ def redact_credentials(text: str) -> str:
         return text
     text = _URL_CREDENTIAL_RE.sub(lambda m: f"{m.group('scheme')}***:***@", text)
     text = _KEY_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    text = _BEARER_RE.sub(lambda m: f"{m.group(1)} ***", text)
     return text

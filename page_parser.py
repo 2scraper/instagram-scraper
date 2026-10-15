@@ -83,7 +83,7 @@ log = logging.getLogger("page_parser")
 BASE_URL = "https://www.instagram.com"
 SOURCE = "instagram.com"
 
-MIN_CARD_MATCHES = 1  # one URL is one profile or one post (CLAUDE.md §5 names the constant; there is no grid)
+MIN_CARD_MATCHES = 1  # one URL is one profile or one post (the family's readiness constant; there is no grid)
 
 # The routes a logged-out page can be served as (see the module docstring).
 ROUTE_PROFILE = "comet.igweb.PolarisLoggedOutDesktopWWWProfileRoute"
@@ -95,7 +95,7 @@ _ROUTE_RE = re.compile(r'"canonicalRouteName"\s*:\s*"([A-Za-z0-9_.]+)"')
 # No captcha or bot-challenge vendor was met on any logged-out capture:
 # Instagram answers a visitor it distrusts with its own login page (above),
 # not with a challenge. The generic captcha_solver markers stay on; this
-# site adds none. Counted on the good captures first (CLAUDE.md §18): the
+# site adds none. Counted on the good captures first: the
 # generic set matches nothing on a real profile or post page.
 BOT_CHALLENGE_MARKERS: tuple = ()
 
@@ -507,7 +507,7 @@ def parse_page(html: str, *, url: str) -> PageResult:
 
 def safe_parse_page(html: str, **kwargs) -> PageResult:
     """Engine entry point: a parse exception degrades this ONE url to a
-    rejected result instead of crashing the batch (CLAUDE.md §6/§10)."""
+    rejected result instead of crashing the batch."""
     try:
         return parse_page(html, **kwargs)
     except Exception as exc:  # noqa: BLE001

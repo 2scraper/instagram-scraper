@@ -413,7 +413,8 @@ Chromium.
   account, so there is no `location` column. If you find a logged-out
   post page that carries one, please open an issue with its URL.
 - **A datacentre address may get the login page from the first request.**
-  Not measured yet; a residential proxy is the fix.
+  Measured once, 2026-10-15: a GitHub-hosted runner got the login page for
+  the very first request (`natgeo`, exit 3). A residential proxy is the fix.
 
 ## Is this allowed?
 
