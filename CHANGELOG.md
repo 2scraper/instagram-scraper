@@ -8,6 +8,8 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-15
+
 > **Behaviour changes.** CSV output now prefixes a leading apostrophe to any
 > text cell that starts with `=`, `+`, `-`, `@`, a tab, CR or LF, so a
 > spreadsheet does not run a caption or bio as a formula; the sidecar records
