@@ -11,8 +11,8 @@ as `source_changed`, not `changed` — it says something about how much of
 each run's data got DOM-confirmed, not about the site. `--fail-on-change`
 ignores `source_changed` rows for exactly that reason.
 
-Added after the 2026-09-30 audit, which diffed one SKU at 9.93 USD from a
-"dress" run against 19.93 EUR from a "jeans" run and got a price change:
+Added after a 2026-09-30 audit found that two runs of DIFFERENT scopes
+(two different listings) could be diffed into a false "price change":
 
 - Two runs must share their scope — the sidecar `url` (host, path and
   query: market, search term, category) and `sort`. Otherwise the diff is

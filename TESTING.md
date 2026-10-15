@@ -122,9 +122,10 @@ cannot authenticate one.
 
 `tests.yml` runs the offline suite on Python 3.9 and 3.12, builds the
 wheel and the Docker image, and runs one `engine-smoke` job per engine.
-`canary.yml` needs the `INSTAGRAM_PROXY` repo secret (a residential
-proxy); without it the job skips with a notice. Dispatch it once by hand
-and check both branches.
+`canary.yml` always runs against live Instagram: through the
+`INSTAGRAM_PROXY` repo secret (a residential proxy) when it is set, and
+direct from the GitHub runner when it is not. A refused, empty or partial
+run is red; without the secret the error names it. It never skips green.
 
 ## 9. What "done" looks like
 

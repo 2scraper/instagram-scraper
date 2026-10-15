@@ -4,7 +4,7 @@ playwright_scraper.py (same flags, same exit codes, same status semantics
 — see output_writer.finish_run). Selenium is not the primary engine
 (Playwright is); it exists for parity, not because it is preferred.
 
-Same hard engine limits as the rest of the family (see CLAUDE.md §6):
+Same hard engine limits as the rest of the family:
 
   - Selenium CANNOT use an AUTHENTICATED remote CDP endpoint. A
     `--cdp-endpoint` carrying credentials (the Scraping Browser API shape)
@@ -67,7 +67,7 @@ _CHROME_BINARY = os.environ.get("SELENIUM_CHROME_BIN") or os.environ.get("CHROME
 _CHROMEDRIVER_PATH = os.environ.get("SELENIUM_CHROMEDRIVER_PATH") or os.environ.get("CHROMEDRIVER_PATH")
 
 # Selenium Manager phones home to plausible.io with usage stats by default
-# (confirmed live on stockx-scraper/skyscanner-scraper/lidl-scraper) —
+# (confirmed live on sibling repos) —
 # opted out the same way here, before this module's own SECURITY.md
 # promise is tested.
 os.environ.setdefault("SE_AVOID_STATS", "true")
@@ -75,11 +75,9 @@ os.environ.setdefault("SE_AVOID_STATS", "true")
 log = logging.getLogger("selenium_scraper")
 
 
-def _positive_int(value: str) -> int:
-    ivalue = int(value)
-    if ivalue < 1:
-        raise argparse.ArgumentTypeError(f"must be a positive integer (got {value!r})")
-    return ivalue
+_positive_int = page_flow.positive_int
+_nonnegative_int = page_flow.nonnegative_int
+_nonnegative_float = page_flow.nonnegative_float
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -91,19 +89,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--urls-file", default=None)
     p.add_argument("--posts", type=int, default=0, metavar="N", help="Also fetch each profile's N most recent posts (0-12; a logged-out profile page embeds 12, pinned first)")
     p.add_argument("--max-results", type=_positive_int, default=100)
-    p.add_argument("--delay-between-pages", type=float, default=2.0)
+    p.add_argument("--delay-between-pages", type=_nonnegative_float, default=2.0)
     p.add_argument("--format", choices=["json", "csv"], default="json")
     p.add_argument("--out", default=None)
-    p.add_argument("--retries", type=int, default=2)
-    p.add_argument("--retry-delay", type=float, default=3.0)
+    p.add_argument("--retries", type=_nonnegative_int, default=2)
+    p.add_argument("--retry-delay", type=_nonnegative_float, default=3.0)
     p.add_argument("--proxy", default=None)
     p.add_argument("--proxy-file", default=None)
     p.add_argument("--proxy-shuffle", action="store_true")
-    p.add_argument("--proxy-block-retries", type=int, default=3)
+    p.add_argument("--proxy-block-retries", type=_nonnegative_int, default=3)
     p.add_argument("--twocaptcha-key", default=None)
     p.add_argument("--captcha-api", default=None, help="Override the 2Captcha API base URL (testing only)")
     p.add_argument("--solve-captcha", choices=["off", "when-blocked", "always"], default="when-blocked")
-    p.add_argument("--max-solves", type=int, default=8, help="Cap on PAID 2Captcha solves for the whole run (0 = never pay); recorded as solves_spent")
+    p.add_argument("--max-solves", type=_nonnegative_int, default=8, help="Cap on PAID 2Captcha solves for the whole run (0 = never pay); recorded as solves_spent")
     p.add_argument("--min-score", type=float, default=0.3, help="Minimum acceptable reCAPTCHA v3 score (2Captcha's minScore task field)")
     p.add_argument("--fingerprint", action="store_true", help="Fetch and apply a 2Captcha Fingerprint API profile's user agent (ignored with --cdp-endpoint — see fingerprint_client.refuse_if_cdp)")
     p.add_argument("--fp-tags", default=None, help="Fingerprint API filter, e.g. 'Windows'")

@@ -4,12 +4,12 @@
 Only paths and rule names are printed. A suspicious value is never echoed
 back into a CI log, because an exception/report is a credential leak too.
 
-Unlike tipranks-scraper (no credential model at all), this repo has a
-real one: a 2Captcha API key, proxy credentials, a Scraping Browser CDP
-endpoint, a Fingerprint API key. `env_config.py` is the only place any of
-these are read from (`.env`, never argv — CLAUDE.md Sec.3), and
-`proxy_pool.redact_credentials` is the only place a credentialed URL gets
-logged or re-raised (CLAUDE.md Sec.8). This scanner is the third,
+This repo handles real credentials: a 2Captcha API key, proxy
+credentials, a Scraping Browser CDP endpoint, a Fingerprint API key.
+`env_config.py` is the only place any of these are read from (`.env`,
+never argv, where `ps` and shell history would see them), and
+`proxy_pool.redact_credentials` masks a credentialed URL before it is
+logged or re-raised. This scanner is the third,
 independent check: it never trusts that either of those held everywhere
 they should have -- it just re-reads every committed/staged file and
 looks for the shapes a real credential takes, the same way a reviewer
@@ -26,9 +26,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ALLOWLIST = {
     ".github/ci_checks.py",  # contains the detector patterns themselves
-    ".env.example",  # documents placeholder credentials verbatim, on purpose (CLAUDE.md Sec.17)
-    "smoke_test.py",  # deliberate credential-shaped masking/redaction test fixtures
+    ".env.example",  # documents placeholder credentials verbatim, on purpose
 }
+# smoke_test.py is NOT exempt: its credential-shaped fixtures are assembled
+# from pieces, so the largest file in the repo is scanned like any other.
 
 TOKEN_RULES = {
     "private_key": re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
@@ -38,8 +39,8 @@ TOKEN_RULES = {
 }
 URL_CREDENTIALS = re.compile(r"\b(?:https?|wss?)://([^\s/@:]+):([^\s/@]+)@", re.I)
 # The name may itself be quoted, and JSON-escaped inside a string
-# (`"api_key": "…"`, `\"api_key\": \"…\"`) — CLAUDE.md §24: the old form
-# required `=`/`:` right after the bare name and missed both.
+# (`"api_key": "…"`, `\"api_key\": \"…\"`): a form that required `=`/`:`
+# right after the bare name missed both, and every fixture here is JSON.
 SECRET_ASSIGNMENT = re.compile(
     r"\b(?:api[_-]?key|client[_-]?key|twocaptcha[_-]?key|TWOCAPTCHA_KEY|INSTAGRAM_PROXY|"
     r"INSTAGRAM_CDP_ENDPOINT|FINGERPRINT_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)"
@@ -50,6 +51,9 @@ SECRET_ASSIGNMENT = re.compile(
 # A 2Captcha key is 32 lowercase hex characters; next to a key-like word it
 # is a credential whatever the assignment syntax around it.
 KEYISH_HEX32 = re.compile(r"(?i)(?:key|token)\W{0,8}\b[0-9a-f]{32}\b")
+# And on its own: no file in this repo has a legitimate reason to carry a
+# bare 32-hex string, so there are no exemptions to reason about.
+BARE_HEX32 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{32}(?![0-9A-Za-z])")
 PLACEHOLDER_WORDS = (
     "user", "username", "login", "pass", "password", "example", "fake",
     "secret", "redacted", "changeme", "your", "test",
@@ -81,7 +85,7 @@ _NOT_SOURCE_DIR = re.compile(r"(^|/)(\.venv[^/]*|venv|env|node_modules|build|dis
 def _in_virtualenv(relative: str) -> bool:
     """True when any parent directory holds a `pyvenv.cfg` — a virtualenv
     under ANY name (`myenv/`, `.venv-selenium/`), not just the names the
-    regex above knows (CLAUDE.md §23)."""
+    regex above knows."""
     parent = (ROOT / relative).parent
     while parent != ROOT and ROOT in parent.parents:
         if (parent / "pyvenv.cfg").exists():
@@ -108,7 +112,17 @@ def repository_files() -> list[str]:
             for p in ROOT.rglob("*")
             if p.is_file()
         ]
-    return [p for p in paths if not _NOT_SOURCE_DIR.search(p) and not _in_virtualenv(p)]
+    paths += env_backups()
+    return [p for p in dict.fromkeys(paths) if not _NOT_SOURCE_DIR.search(p) and not _in_virtualenv(p)]
+
+
+def env_backups() -> list[str]:
+    """Copies of `.env` (`.env.bak`, `.env.local`, `.env.save`, ...).
+    `.gitignore` ignores them, so `git ls-files --exclude-standard` never
+    lists them — yet a renamed working copy is exactly where a live key
+    sits one `git add -f` from a commit. `.env` itself is the user's real
+    configuration and is not scanned; `.env.example` is allowlisted."""
+    return sorted(p.name for p in ROOT.glob(".env.*") if p.is_file() and p.name != ".env.example")
 
 
 def is_placeholder(user: str, password: str) -> bool:
@@ -145,7 +159,7 @@ def _looks_like_type_hint(value: str) -> bool:
 def scan_text(relative: str, text: str) -> list[tuple[str, int, str]]:
     """The rules, on one file's text — separate so a check can PLANT a
     credential and require it to be found (a scanner that cannot fail is
-    not a scanner, CLAUDE.md §25)."""
+    not a scanner)."""
     findings: list[tuple[str, int, str]] = []
     for line_no, line in enumerate(text.splitlines(), 1):
         if True:
@@ -165,6 +179,8 @@ def scan_text(relative: str, text: str) -> list[tuple[str, int, str]]:
                     findings.append((relative, line_no, "secret_assignment"))
             if KEYISH_HEX32.search(line):
                 findings.append((relative, line_no, "hex32_key"))
+            elif BARE_HEX32.search(line):
+                findings.append((relative, line_no, "bare_hex32"))
     return findings
 
 
@@ -183,8 +199,9 @@ def scan() -> list[tuple[str, int, str]]:
 
 def sample_check() -> int:
     """sample_output.{json,csv} carry exactly the Product columns. Lives
-    here so tests.yml calls it instead of importing a local module inline
-    (CLAUDE.md §26)."""
+    here so tests.yml calls it instead of importing a local module inline:
+    nothing runs a workflow locally, so an inline import is first tested
+    on a push."""
     import csv
     import json
     sys.path.insert(0, str(ROOT))
