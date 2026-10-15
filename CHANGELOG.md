@@ -41,7 +41,9 @@ that changes a default is called out at the top of its entry.
   in the other two engines.
 - The live canary no longer skips green without the `INSTAGRAM_PROXY`
   secret: it runs direct from the GitHub runner and goes red if the site
-  was not read, naming the missing secret.
+  was not read, naming the missing secret. Its first run (2026-10-15) was
+  refused from the runner with Instagram's login page, so it stays red until
+  the secret is set.
 - Comments describe this repo's own rules instead of pointing at internal
   notes or other projects.
 
