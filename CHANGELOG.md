@@ -8,6 +8,12 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+### Changed
+
+- CI only: the canary's optional paid secret `INSTAGRAM_PROXY` now reaches it only on a new weekly
+  run (Mondays 06:41 UTC) and on a manual dispatch. The daily run keeps its
+  schedule and takes the free route without them, so it bills nothing.
+
 ## [0.3.0] - 2026-10-15
 
 > **Behaviour changes.** CSV output now prefixes a leading apostrophe to any
