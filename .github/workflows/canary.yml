@@ -2,11 +2,7 @@ name: canary
 
 on:
   schedule:
-    - cron: "41 6 * * *"   # once daily; avoid :00 so it doesn't pile up with everyone else's
-    # Mondays: the same jobs, WITH the paid secrets (proxy, Scraping Browser,
-    # captcha key). On the daily run above those secrets read as empty, so
-    # it takes the free no-secret route and bills nothing.
-    - cron: "41 6 * * 1"
+    - cron: "41 6 * * 1"   # weekly, Mondays; avoid :00 so it doesn't pile up with everyone else's
   workflow_dispatch: {}     # dispatch manually at least once before trusting the badge
 
 jobs:
@@ -25,11 +21,11 @@ jobs:
   canary:
     runs-on: ubuntu-latest
     env:
-      HAS_PROXY: ${{ (github.event_name != 'schedule' || github.event.schedule == '41 6 * * 1') && secrets.INSTAGRAM_PROXY != '' }}
+      HAS_PROXY: ${{ secrets.INSTAGRAM_PROXY != '' }}
       CANARY_ACCOUNT: ${{ vars.INSTAGRAM_CANARY_ACCOUNT || 'natgeo' }}
       # Reaches the scraper through the environment only, never argv
       # (env_config.py reads INSTAGRAM_PROXY; an empty value means unset).
-      INSTAGRAM_PROXY: ${{ (github.event_name != 'schedule' || github.event.schedule == '41 6 * * 1') && secrets.INSTAGRAM_PROXY || '' }}
+      INSTAGRAM_PROXY: ${{ secrets.INSTAGRAM_PROXY }}
     steps:
       - uses: actions/checkout@v4
 
