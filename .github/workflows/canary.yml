@@ -55,7 +55,11 @@ jobs:
       - name: Require a complete run with full rows
         run: |
           python3 -c "
-          import json, os
+          import json, os, sys, traceback
+          def annotate(kind, exc, tb):
+              traceback.print_exception(kind, exc, tb)
+              print('::error::canary row check failed: %s: %s' % (kind.__name__, str(exc)[:400].replace(chr(10), ' ')))
+          sys.excepthook = annotate
           code = int(os.environ['canary_exit'])
           print(f'exit {code}')
           if code != 0:
@@ -63,6 +67,8 @@ jobs:
                   print('::error::The direct run from the GitHub runner did not complete (exit %d). '
                         'If it was refused (exit 3), set the INSTAGRAM_PROXY repo secret (a residential '
                         'http://login:password@host:port proxy) so the canary can reach the site.' % code)
+              else:
+                  print('::error::canary exit %d through the INSTAGRAM_PROXY secret (1 crash, 3 blocked, 4 zero rows, 5 content never obtained, 6 partial). A proxy that rejects its credential (HTTP 407) reaches Chromium as a navigation timeout, so on exit 5 check the INSTAGRAM_PROXY secret first.' % code)
               raise SystemExit(f'canary requires EXIT_OK=0, got {code}')
           meta = json.load(open('canary.json.meta.json'))
           print(json.dumps(meta, indent=2))
