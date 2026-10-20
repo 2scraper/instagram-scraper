@@ -55,7 +55,8 @@ import scraper_api_client
 import page_parser as pp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
 from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
-from proxy_pool import Proxy, ProxyPool, ProxyParseError, load_proxies, redact_credentials
+from proxy_pool import (BLOCKED_CDP_RESOURCE_TYPES, Proxy, ProxyPool, ProxyParseError, load_proxies, pyppeteer_block_media,
+                        redact_credentials, should_block_media)
 from scraper_api_client import TwoCaptchaClient
 
 ENGINE_NAME = "puppeteer"
@@ -105,6 +106,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dump-html", action="store_true")
     p.add_argument("--headless", dest="headless", action="store_true", default=True)
     p.add_argument("--headful", dest="headless", action="store_false")
+    page_flow.add_media_arguments(p)
     page_flow.add_run_arguments(p)
     return p
 
@@ -134,7 +136,7 @@ async def _launch(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
     return await pyppeteer_launch(**kwargs)
 
 
-async def _authenticate_if_needed(page, proxy: Optional[Proxy]) -> None:
+async def _authenticate_if_needed(page, proxy: Optional[Proxy], *, block_media: bool = False) -> None:
     """Answer the proxy's auth challenge over the CDP `Fetch` domain.
 
     pyppeteer's own `page.authenticate()` turns on
@@ -142,14 +144,24 @@ async def _authenticate_if_needed(page, proxy: Optional[Proxy]) -> None:
     measured 2026-10-04 with Chrome for Testing, every proxied URL failed
     with "'Network.setRequestInterception' wasn't found" before a byte was
     fetched. `Fetch` is that method's replacement and exists in every
-    Chromium since 74. Credentials travel in the CDP message, never argv."""
+    Chromium since 74. Credentials travel in the CDP message, never argv.
+
+    With `block_media`, the same requestPaused handler fails images, media
+    and fonts (one Fetch interception per page, not two); without a
+    credential to answer, proxy_pool.pyppeteer_block_media does it alone."""
     auth = proxy.pyppeteer_auth_dict() if proxy is not None else None
     if not auth:
+        if block_media:
+            await pyppeteer_block_media(page)
         return
     client = page._client
 
     async def _continue(event):
         try:
+            if block_media and event.get("resourceType") in BLOCKED_CDP_RESOURCE_TYPES:
+                await client.send("Fetch.failRequest", {"requestId": event["requestId"],
+                                                        "errorReason": "BlockedByClient"})
+                return
             await client.send("Fetch.continueRequest", {"requestId": event["requestId"]})
         except Exception as exc:  # noqa: BLE001 — a request cancelled meanwhile is not an error
             log.debug("Fetch.continueRequest failed: %s", redact_credentials(str(exc)))
@@ -198,11 +210,12 @@ async def _release(browser, *, remote: bool) -> None:
         log.debug("browser release failed: %s", exc)
 
 
-async def _open_page(browser, *, proxy: Optional[Proxy], user_agent: Optional[str], autosolve: bool):
+async def _open_page(browser, *, proxy: Optional[Proxy], user_agent: Optional[str], autosolve: bool,
+                     block_media: bool = False):
     page = await browser.newPage()
     if user_agent:
         await page.setUserAgent(user_agent)
-    await _authenticate_if_needed(page, proxy)
+    await _authenticate_if_needed(page, proxy, block_media=block_media)
     if autosolve:
         await _enable_scraping_browser_auto_solve(page)
     return page
@@ -244,10 +257,14 @@ class _PyppeteerEngine:
 
     def __init__(self, args: argparse.Namespace, *, remote_browser, autosolve: bool, user_agent: Optional[str], client):
         self.args, self.remote_browser, self.autosolve, self.user_agent, self.client = args, remote_browser, autosolve, user_agent, client
+        self.media_blocked = False
 
     async def open(self, proxy) -> _PyppeteerSession:
         browser = self.remote_browser or await _launch(headless=self.args.headless, proxy=proxy, cdp_endpoint=None)
-        page = await _open_page(browser, proxy=proxy, user_agent=self.user_agent, autosolve=self.autosolve)
+        block = should_block_media(self.args, proxy_in_use=proxy is not None, over_cdp=self.remote_browser is not None)
+        self.media_blocked = self.media_blocked or block
+        page = await _open_page(browser, proxy=proxy, user_agent=self.user_agent, autosolve=self.autosolve,
+                                block_media=block)
         return _PyppeteerSession(page, browser, owns_browser=self.remote_browser is None)
 
     async def sleep(self, seconds: float) -> None:
@@ -306,6 +323,11 @@ async def run(args: argparse.Namespace) -> int:
     if args.cdp_endpoint and proxy_pool is not None:
         log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
         proxy_pool = None
+    # Before any browser exists: a proxy that refuses its credential (407) or
+    # has no traffic left (402) would refuse every request the browser makes.
+    stop = page_flow.proxy_precheck(args, proxy_pool, urls=urls, engine_name=ENGINE_NAME, started_at=started_at)
+    if stop is not None:
+        return stop
 
     client = None
     if args.twocaptcha_key and (args.solve_captcha != "off" or args.fingerprint):

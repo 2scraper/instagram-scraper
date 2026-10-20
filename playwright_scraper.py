@@ -46,7 +46,8 @@ import scraper_api_client
 import page_parser as pp
 from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
-from proxy_pool import Proxy, ProxyPool, ProxyParseError, load_proxies, redact_credentials
+from proxy_pool import (BLOCKED_RESOURCE_TYPES, Proxy, ProxyPool, ProxyParseError, load_proxies, redact_credentials,
+                        should_block_media)
 from scraper_api_client import TwoCaptchaClient
 
 ENGINE_NAME = "playwright"
@@ -99,6 +100,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dump-html", action="store_true", help="Save each fetched page's HTML next to --out, on success too")
     p.add_argument("--headless", dest="headless", action="store_true", default=True)
     p.add_argument("--headful", dest="headless", action="store_false")
+    page_flow.add_media_arguments(p)
     page_flow.add_run_arguments(p)
     return p
 
@@ -112,6 +114,7 @@ _resolve_urls = page_flow.resolve_urls  # the one implementation is page_flow's
 
 async def _new_context(
     browser: Browser, proxy: Optional[Proxy], user_agent: Optional[str], *, reuse_default: bool = False,
+    block_media: bool = False,
 ) -> BrowserContext:
     """Over --cdp-endpoint, reuse the profile's own default context: it
     holds the cookies that make the profile worth reusing. A local browser
@@ -124,7 +127,22 @@ async def _new_context(
         kwargs["proxy"] = proxy.playwright_proxy_dict()
     if user_agent:
         kwargs["user_agent"] = user_agent
-    return await browser.new_context(**kwargs)
+    context = await browser.new_context(**kwargs)
+    if block_media:
+        # Images, video and fonts through a metered proxy: the parser reads
+        # the page's embedded JSON, never these.
+        await context.route("**/*", _async_media_route)
+    return context
+
+
+async def _async_media_route(route) -> None:
+    """proxy_pool.playwright_media_route for the ASYNC API, whose
+    route.abort()/continue_() are coroutines that must be awaited (the sync
+    handler would create them and drop them, so nothing would be decided)."""
+    if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
+        await route.abort("blockedbyclient")
+    else:
+        await route.continue_()
 
 
 async def _close(page: Page, context: BrowserContext, *, reuse_default: bool) -> None:
@@ -199,10 +217,14 @@ class _PlaywrightEngine:
 
     def __init__(self, browser: Browser, args: argparse.Namespace, *, autosolve: bool, user_agent: Optional[str], client):
         self.browser, self.args, self.autosolve, self.user_agent, self.client = browser, args, autosolve, user_agent, client
+        self.media_blocked = False
 
     async def open(self, proxy) -> _PlaywrightSession:
         reuse_default = bool(self.args.cdp_endpoint)
-        context = await _new_context(self.browser, proxy, self.user_agent, reuse_default=reuse_default)
+        block = should_block_media(self.args, proxy_in_use=proxy is not None, over_cdp=reuse_default)
+        self.media_blocked = self.media_blocked or block
+        context = await _new_context(self.browser, proxy, self.user_agent, reuse_default=reuse_default,
+                                     block_media=block)
         page = await context.new_page()
         if self.autosolve:
             await _enable_scraping_browser_auto_solve(context, page)
@@ -242,6 +264,11 @@ async def run(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_BAD_USAGE
     proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
+    # Before any browser exists: a proxy that refuses its credential (407) or
+    # has no traffic left (402) would refuse every request the browser makes.
+    stop = page_flow.proxy_precheck(args, proxy_pool, urls=urls, engine_name=ENGINE_NAME, started_at=started_at)
+    if stop is not None:
+        return stop
 
     client = None
     if args.twocaptcha_key and (args.solve_captcha != "off" or args.fingerprint):

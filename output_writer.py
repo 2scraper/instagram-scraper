@@ -329,6 +329,41 @@ def write_meta(
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
+# A run that stopped before it fetched anything — the proxy refused its
+# credential at the pre-check — has no dataset to describe, and
+# `<out>.meta.json` must keep describing the output still beside it. What
+# happened to THIS attempt goes into its own file instead.
+ATTEMPT_META_SUFFIX = ".latest_attempt.meta.json"
+
+
+def write_failed_attempt(
+    out_path: str, *, stop_reason: str, engine: str, url: str, pages_requested: int,
+    started_at: float, transport_error: str,
+) -> str:
+    """Record an attempt that ended before `finish_run` could run. Only
+    `<out>.latest_attempt.meta.json` is written; the output file and
+    `<out>.meta.json` are left exactly as they were."""
+    meta = {
+        "status": "failed",
+        "stop_reason": stop_reason,
+        "engine": engine,
+        "url": url,
+        "pages_requested": pages_requested,
+        "pages_completed": 0,
+        "failed_pages": [],
+        "product_count": 0,
+        "started_at": started_at,
+        "finished_at": time.time(),
+        "blocked": False,
+        "transport_error": transport_error,
+        "data_updated": False,
+    }
+    path = f"{out_path}{ATTEMPT_META_SUFFIX}"
+    with _atomic(path) as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # finish_run — the single place every engine calls to decide exit code,
 # whether to write output at all, and whether to write a sidecar. Keeping

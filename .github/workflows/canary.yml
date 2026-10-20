@@ -68,7 +68,7 @@ jobs:
                         'If it was refused (exit 3), set the INSTAGRAM_PROXY repo secret (a residential '
                         'http://login:password@host:port proxy) so the canary can reach the site.' % code)
               else:
-                  print('::error::canary exit %d through the INSTAGRAM_PROXY secret (1 crash, 3 blocked, 4 zero rows, 5 content never obtained, 6 partial). A proxy that rejects its credential (HTTP 407) reaches Chromium as a navigation timeout, so on exit 5 check the INSTAGRAM_PROXY secret first.' % code)
+                  print('::error::canary exit %d through the INSTAGRAM_PROXY secret (1 crash, 3 blocked, 4 zero rows, 5 content never obtained, 6 partial). A proxy that rejects its credential (HTTP 407) or has no traffic left (HTTP 402) stops the run at its proxy pre-check with exit 5 and says so in the log above, so on exit 5 check the INSTAGRAM_PROXY secret first.' % code)
               raise SystemExit(f'canary requires EXIT_OK=0, got {code}')
           meta = json.load(open('canary.json.meta.json'))
           print(json.dumps(meta, indent=2))

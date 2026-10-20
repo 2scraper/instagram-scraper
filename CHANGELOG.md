@@ -8,6 +8,27 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+> **Behaviour changes.**
+> * Behind `--proxy` / `--proxy-file`, all three browser engines send one
+>   `HEAD https://www.instagram.com/robots.txt` through the first exit before
+>   launching a browser. A gateway `407` (credential refused, or traffic
+>   exhausted) or `402` (traffic/balance exhausted) now ends the run with exit
+>   5 and `stop_reason: proxy_auth_failed` in the new
+>   `<out>.latest_attempt.meta.json`. No browser is started, and `<out>` and
+>   `<out>.meta.json` are left as they were. Any other answer, or a transport
+>   error, leaves the run as it was. Not sent with `--cdp-endpoint`,
+>   `--scraper-api` or without a proxy.
+> * Behind a local proxy, images, video/audio and web fonts are no longer
+>   downloaded. Playwright aborts them by resource type. Puppeteer fails them
+>   in the `Fetch` handler that answers the proxy's password prompt. Selenium
+>   blocks them by URL extension. `--load-media` restores the old behaviour.
+>   Nothing changes with `--cdp-endpoint`, `--scraper-api` or with no proxy.
+>   `<out>.meta.json` records `media_blocked`.
+
+### Added
+
+- `--load-media` in all three engines.
+
 ### Changed
 
 - CI only: a failed canary check now always ends with an `::error::` line. A run
@@ -15,6 +36,8 @@ that changes a default is called out at the top of its entry.
   annotation, and a missing or wrong output file showed only a traceback.
   The message notes that a proxy rejecting its credential (HTTP 407) shows
   up in Chromium as a navigation timeout (exit 5), not as a 407.
+- CI only: that message now points at the proxy pre-check, which reports a
+  `407` or `402` by name before any browser is started.
 - CI only: the canary now runs weekly (Mondays 06:41 UTC) and on a manual dispatch, with its optional secret `INSTAGRAM_PROXY` passed on every run; the daily schedule is removed.
 
 ## [0.3.0] - 2026-10-15

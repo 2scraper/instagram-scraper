@@ -1357,6 +1357,316 @@ def _():
                     assert "::error::" in proc.stdout, (has_proxy, code, proc.stdout[-300:], proc.stderr[-300:])
 
 
+# --------------------------------------------------------------------------- #
+# Traffic savers: the proxy pre-check and media blocking
+# --------------------------------------------------------------------------- #
+def _status_proxy(status):
+    """A local stand-in for a proxy gateway that answers every request,
+    CONNECT included, with `status`. Returns (server, port, hits)."""
+    import http.server
+    import socketserver
+    import threading
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _answer(self):
+            hits.append((self.command, self.path))
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Proxy-Authenticate", 'Basic realm="stub"')
+            self.end_headers()
+        do_CONNECT = do_GET = do_HEAD = _answer
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1], hits
+
+
+_STUB_LOGIN = "user"
+_STUB_SECRET = "S3cret" + "Pw"
+
+
+def _stub_proxy_url(port):
+    return "http://" + "%s:%s" % (_STUB_LOGIN, _STUB_SECRET) + "@127.0.0.1:%d" % port
+
+
+def _patched_browser_start(mod):
+    """Patch the engine's browser launch to record the call and fail. The
+    driver need not be installed: the pre-check runs before it is used."""
+    from unittest import mock
+    started = []
+
+    def launch(*a, **k):
+        started.append(True)
+        raise RuntimeError("stub: the browser would start here")
+    if mod is playwright_scraper:
+        return started, [mock.patch.object(mod, "async_playwright", launch)]
+    if mod is puppeteer_scraper:
+        return started, [mock.patch.object(mod, "pyppeteer_launch", launch),
+                         mock.patch.object(mod, "_launch", lambda **k: launch())]
+    return started, [mock.patch.object(mod, "webdriver", object()),
+                     mock.patch.object(mod, "_build_driver", launch)]
+
+
+def _run_engine_quietly(mod, argv):
+    import contextlib
+    import io
+    import logging
+    args = mod.build_arg_parser().parse_args(argv)
+    out = io.StringIO()
+    logging.disable(logging.CRITICAL)
+    try:
+        with contextlib.redirect_stderr(out), contextlib.redirect_stdout(out):
+            rc = asyncio_run_maybe(mod, args)
+    finally:
+        logging.disable(logging.NOTSET)
+    return rc, out.getvalue()
+
+
+@check("proxy pre-check: a gateway 407 or 402 exits 5 after ONE request, before any browser, naming INSTAGRAM_PROXY and never the credential; only the attempt sidecar is written and earlier output is untouched (every engine)")
+def _():
+    import contextlib
+    for mod in (playwright_scraper, puppeteer_scraper, selenium_scraper):
+        for status, words in ((407, "refused the credential"), (402, "balance exhausted")):
+            server, port, hits = _status_proxy(status)
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "o.json"
+                out.write_text("[1]")
+                Path(f"{out}.meta.json").write_text('{"status": "complete"}')
+                started, patches = _patched_browser_start(mod)
+                try:
+                    with contextlib.ExitStack() as stack:
+                        for p in patches:
+                            stack.enter_context(p)
+                        rc, text = _run_engine_quietly(mod, ["--url", "natgeo", "--out", str(out),
+                                                             "--proxy", _stub_proxy_url(port)])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                tag = f"{mod.__name__} {status}"
+                assert rc == output_writer.EXIT_REMOTE_API_ERROR, (tag, rc, text[-300:])
+                assert not started, f"{tag}: a browser was started"
+                assert hits == [("CONNECT", "www.instagram.com:443")], (tag, hits)
+                assert words in text and "INSTAGRAM_PROXY" in text, (tag, text[-300:])
+                assert _STUB_SECRET not in text, f"{tag}: the credential was printed"
+                attempt = Path(f"{out}{output_writer.ATTEMPT_META_SUFFIX}")
+                meta = json.loads(attempt.read_text())
+                assert (meta["status"], meta["stop_reason"], meta["data_updated"], meta["engine"]) == \
+                    ("failed", "proxy_auth_failed", False, mod.ENGINE_NAME), (tag, meta)
+                assert _STUB_SECRET not in attempt.read_text(), tag
+                assert out.read_text() == "[1]" and Path(f"{out}.meta.json").read_text() == '{"status": "complete"}', tag
+                assert sorted(p.name for p in Path(td).iterdir()) == sorted(
+                    ["o.json", "o.json.meta.json", "o.json" + output_writer.ATTEMPT_META_SUFFIX]), tag
+
+
+@check("proxy pre-check: a site 403 through the tunnel, or an unreachable proxy, is not a verdict — the browser still starts (every engine)")
+def _():
+    import contextlib
+    for mod in (playwright_scraper, puppeteer_scraper, selenium_scraper):
+        server, port, hits = _status_proxy(403)
+        with tempfile.TemporaryDirectory() as td:
+            started, patches = _patched_browser_start(mod)
+            try:
+                with contextlib.ExitStack() as stack:
+                    for p in patches:
+                        stack.enter_context(p)
+                    _run_engine_quietly(mod, ["--url", "natgeo", "--out", str(Path(td) / "o.json"),
+                                              "--proxy", _stub_proxy_url(port), "--retries", "0"])
+            finally:
+                server.shutdown()
+                server.server_close()
+            assert started, f"{mod.__name__}: a site 403 at the pre-check stopped the run"
+            assert len(hits) == 1, (mod.__name__, hits)
+    assert proxy_pool.precheck_proxy("http://user:pass@127.0.0.1:1", "https://x.invalid/robots.txt", 3) is None
+
+
+@check("proxy pre-check: never sent over --cdp-endpoint, --scraper-api or without a proxy; probes the first URL's robots.txt with the exit the first fetch uses")
+def _():
+    import argparse
+    from unittest import mock
+    pool = proxy_pool.ProxyPool(proxy_pool.load_proxies("http://user:pass@127.0.0.1:1", None))
+    with mock.patch.object(proxy_pool, "precheck_proxy", side_effect=AssertionError("pre-check sent")):
+        for extra in ({"cdp_endpoint": "ws://127.0.0.1:1"}, {"scraper_api": True}):
+            args = argparse.Namespace(**{"out": "x.json", "cdp_endpoint": None, "scraper_api": False, **extra})
+            assert page_flow.proxy_precheck(args, pool, urls=["https://www.instagram.com/natgeo/"],
+                                            engine_name="t", started_at=0.0) is None, extra
+        args = argparse.Namespace(out="x.json", cdp_endpoint=None, scraper_api=False)
+        assert page_flow.proxy_precheck(args, None, urls=["https://www.instagram.com/natgeo/"],
+                                        engine_name="t", started_at=0.0) is None
+    seen = []
+    with mock.patch.object(proxy_pool, "precheck_proxy", lambda proxy, probe, timeout: seen.append((proxy, probe))):
+        page_flow.proxy_precheck(args, pool, urls=["https://www.instagram.com/p/DeAZ0uAgNuA/"],
+                                 engine_name="t", started_at=0.0)
+    assert seen == [("http://user:pass@127.0.0.1:1", "https://www.instagram.com/robots.txt")], seen
+    assert pool.next().host == "127.0.0.1", "peek() must not have moved the cursor"
+    odd = proxy_pool.Proxy(host="h.example", port=8080, login="user@x", password="pass:s/s")
+    assert odd.url() == "http://" + "user%40x:pass%3As%2Fs" + "@h.example:8080", odd.url()
+    assert proxy_pool.parse_proxy_line("h.example:8080").url() == "http://h.example:8080"
+
+
+@check("media: blocked only for a LOCAL browser behind a proxy; --load-media keeps it; never over CDP; the hidden switch forces it")
+def _():
+    import argparse
+    ns = argparse.Namespace
+    sbm = proxy_pool.should_block_media
+    assert sbm(ns(load_media=False), proxy_in_use=True)
+    assert not sbm(ns(load_media=True), proxy_in_use=True)
+    assert not sbm(ns(load_media=False), proxy_in_use=False)
+    assert not sbm(ns(load_media=False), proxy_in_use=True, over_cdp=True)
+    assert sbm(ns(load_media=False, force_block_media=True), proxy_in_use=False)
+    for mod in (playwright_scraper, puppeteer_scraper, selenium_scraper):
+        text = mod.build_arg_parser().format_help()
+        assert "--load-media" in text and "--force-block-media" not in text, mod.__name__
+        args = mod.build_arg_parser().parse_args(["--url", "natgeo"])
+        assert args.load_media is False and args.force_block_media is False, mod.__name__
+
+
+@check("media: playwright aborts image/media/font and continues everything else, on the context, behind a proxy only")
+def _():
+    import argparse
+
+    class Route:
+        def __init__(self, kind):
+            self.request = argparse.Namespace(resource_type=kind)
+            self.done = None
+
+        async def abort(self, reason=None):
+            self.done = "abort"
+
+        async def continue_(self):
+            self.done = "continue"
+    for kind, want in (("image", "abort"), ("media", "abort"), ("font", "abort"), ("document", "continue"),
+                       ("script", "continue"), ("xhr", "continue"), ("fetch", "continue"), ("stylesheet", "continue")):
+        route = Route(kind)
+        asyncio.run(playwright_scraper._async_media_route(route))
+        assert route.done == want, (kind, route.done)
+
+    class Context:
+        def __init__(self):
+            self.routes = []
+
+        async def route(self, pattern, handler):
+            self.routes.append((pattern, handler))
+
+        async def new_page(self):
+            return object()
+
+    class Browser:
+        contexts = []
+
+        def __init__(self):
+            self.made = []
+
+        async def new_context(self, **kwargs):
+            context = Context()
+            self.made.append(context)
+            return context
+    proxy = proxy_pool.parse_proxy_line("http://user:pass@127.0.0.1:1")
+    for argv, use_proxy, cdp, want in ((["--url", "x"], True, False, True), (["--url", "x"], False, False, False),
+                                       (["--url", "x", "--load-media"], True, False, False),
+                                       (["--url", "x", "--force-block-media"], False, False, True)):
+        args = playwright_scraper.build_arg_parser().parse_args(argv)
+        browser = Browser()
+        engine = playwright_scraper._PlaywrightEngine(browser, args, autosolve=False, user_agent=None, client=None)
+        asyncio.run(engine.open(proxy if use_proxy else None))
+        routes = browser.made[0].routes
+        assert (routes == [("**/*", playwright_scraper._async_media_route)]) == want, (argv, use_proxy, routes)
+        assert engine.media_blocked == want, argv
+    args = playwright_scraper.build_arg_parser().parse_args(["--url", "x", "--cdp-endpoint", "ws://127.0.0.1:1"])
+    browser = Browser()
+    engine = playwright_scraper._PlaywrightEngine(browser, args, autosolve=False, user_agent=None, client=None)
+    asyncio.run(engine.open(proxy))
+    assert browser.made[0].routes == [] and not engine.media_blocked, "media blocked over --cdp-endpoint"
+
+
+@check("media: pyppeteer fails images/media/fonts in its EXISTING proxy-auth Fetch handler (one Fetch.enable), and alone via Fetch resource-type patterns without a credential")
+def _():
+    class Client:
+        def __init__(self):
+            self.sent, self.handlers = [], {}
+
+        def on(self, name, fn):
+            self.handlers[name] = fn
+
+        async def send(self, cmd, params=None):
+            self.sent.append((cmd, params))
+
+    async def drive(proxy, block):
+        client = Client()
+
+        async def create():
+            return client
+        import argparse
+        page = argparse.Namespace(_client=client, target=argparse.Namespace(createCDPSession=create))
+        await puppeteer_scraper._authenticate_if_needed(page, proxy, block_media=block)
+        if "Fetch.requestPaused" in client.handlers:
+            for rid, kind in (("i", "Image"), ("f", "Font"), ("m", "Media"), ("d", "Document"), ("s", "Script")):
+                client.handlers["Fetch.requestPaused"]({"requestId": rid, "resourceType": kind})
+            for _ in range(5):
+                await asyncio.sleep(0)
+        return client.sent
+
+    authed = proxy_pool.parse_proxy_line("http://user:pass@127.0.0.1:1")
+    sent = asyncio.run(drive(authed, True))
+    assert [c for c, _ in sent].count("Fetch.enable") == 1, sent
+    failed = {p["requestId"] for c, p in sent if c == "Fetch.failRequest"}
+    continued = {p["requestId"] for c, p in sent if c == "Fetch.continueRequest"}
+    assert failed == {"i", "f", "m"} and continued == {"d", "s"}, sent
+    sent = asyncio.run(drive(authed, False))
+    assert not [c for c, _ in sent if c == "Fetch.failRequest"], "media failed with --load-media"
+    sent = asyncio.run(drive(None, True))
+    enable = [p for c, p in sent if c == "Fetch.enable"]
+    assert len(enable) == 1 and sorted(p["resourceType"] for p in enable[0]["patterns"]) == ["Font", "Image", "Media"], sent
+    assert {p["requestId"] for c, p in sent if c == "Fetch.failRequest"} >= {"i", "f", "m"}, sent
+    assert asyncio.run(drive(None, False)) == [], "Fetch opened with no credential and no blocking"
+
+
+@check("media: selenium blocks images, video and fonts by URL extension (not js/css) right after the driver is built, behind a proxy only")
+def _():
+    from unittest import mock
+
+    class Driver:
+        def __init__(self):
+            self.sent = []
+
+        def execute_cdp_cmd(self, cmd, params):
+            self.sent.append((cmd, params))
+    proxy = proxy_pool.parse_proxy_line("http://user:pass@127.0.0.1:1")
+    for argv, use_proxy, want in ((["--url", "x"], True, True), (["--url", "x"], False, False),
+                                  (["--url", "x", "--load-media"], True, False)):
+        driver = Driver()
+        args = selenium_scraper.build_arg_parser().parse_args(argv)
+        engine = selenium_scraper._SeleniumEngine(args, user_agent=None, client=None)
+        with mock.patch.object(selenium_scraper, "_build_driver", lambda **k: driver):
+            asyncio.run(engine.open(proxy if use_proxy else None))
+        blocked = dict(driver.sent).get("Network.setBlockedURLs", {}).get("urls", [])
+        assert bool(blocked) == want and engine.media_blocked == want, (argv, use_proxy, driver.sent)
+        if want:
+            assert all(p in blocked for p in ("*.jpg", "*.webp?*", "*.mp4", "*.woff2")), blocked
+            assert not any(p.startswith(("*.js", "*.css")) for p in blocked), blocked
+
+
+@check("media: every local-browser engine consults the policy and applies its blocker, and the sidecar records media_blocked")
+def _():
+    for path, blocker in (("playwright_scraper.py", "_async_media_route"), ("puppeteer_scraper.py", "BLOCKED_CDP_RESOURCE_TYPES"),
+                          ("selenium_scraper.py", "selenium_block_media(driver)")):
+        src = (ROOT / path).read_text(encoding="utf-8")
+        assert "should_block_media(" in src and blocker in src, path
+        assert "page_flow.proxy_precheck(args, proxy_pool" in src, f"{path}: no pre-check"
+        assert "page_flow.add_media_arguments(p)" in src, path
+    with tempfile.TemporaryDirectory() as td:
+        args = playwright_scraper.build_arg_parser().parse_args(["--url", "natgeo", "--out", str(Path(td) / "o.json"),
+                                                                 "--allow-empty"])
+        args._since = None
+        page_flow.finish(args, products=[], blocked=False, remote_api_error=False, engine_name="t", urls=["u"],
+                         started_at=0.0, pages_completed=1, failed_pages=[], media_blocked=True)
+        assert json.loads(Path(td, "o.json.meta.json").read_text())["media_blocked"] is True
+
+
 def run() -> int:
     """All @check-decorated functions above already ran at import time
     (that's the point — see the `check()` docstring) and self-registered

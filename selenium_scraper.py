@@ -55,7 +55,7 @@ import page_flow
 import scraper_api_engine
 import page_parser as pp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
-from proxy_pool import Proxy, ProxyPool, ProxyParseError, load_proxies
+from proxy_pool import Proxy, ProxyPool, ProxyParseError, load_proxies, selenium_block_media, should_block_media
 from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
 from scraper_api_client import TwoCaptchaClient
 
@@ -113,6 +113,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dump-html", action="store_true")
     p.add_argument("--headless", dest="headless", action="store_true", default=True)
     p.add_argument("--headful", dest="headless", action="store_false")
+    page_flow.add_media_arguments(p)
     page_flow.add_run_arguments(p)
     return p
 
@@ -231,10 +232,20 @@ class _SeleniumEngine:
 
     def __init__(self, args: argparse.Namespace, *, user_agent: Optional[str], client):
         self.args, self.user_agent, self.client = args, user_agent, client
+        self.media_blocked = False
 
     async def open(self, proxy) -> _SeleniumSession:
-        return _SeleniumSession(_build_driver(headless=self.args.headless, proxy=proxy,
-                                              cdp_endpoint=self.args.cdp_endpoint, user_agent=self.user_agent))
+        driver = _build_driver(headless=self.args.headless, proxy=proxy,
+                               cdp_endpoint=self.args.cdp_endpoint, user_agent=self.user_agent)
+        if should_block_media(self.args, proxy_in_use=proxy is not None, over_cdp=bool(self.args.cdp_endpoint)):
+            # By URL pattern (Selenium has no request events): an image
+            # served without a file extension still loads.
+            try:
+                selenium_block_media(driver)
+                self.media_blocked = True
+            except WebDriverException as exc:
+                log.warning("Could not block media over CDP (continuing with it): %s", str(exc).splitlines()[0][:200])
+        return _SeleniumSession(driver)
 
     async def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
@@ -281,6 +292,13 @@ def run(args: argparse.Namespace) -> int:
     if args.cdp_endpoint and proxy_pool is not None:
         log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
         proxy_pool = None
+    # Before any browser exists: a proxy that refuses its credential (407) or
+    # has no traffic left (402) would refuse every request the browser makes.
+    # Checked with the proxy as configured, credentials included: the
+    # question is whether the proxy account itself is refused or exhausted.
+    stop = page_flow.proxy_precheck(args, proxy_pool, urls=urls, engine_name=ENGINE_NAME, started_at=started_at)
+    if stop is not None:
+        return stop
 
     client = None
     if args.twocaptcha_key and (args.solve_captcha != "off" or args.fingerprint):
