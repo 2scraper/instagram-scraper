@@ -208,6 +208,55 @@ getting blocked is dropped; once every exit is dropped the run stops, and
 never falls back to your own address), keep `--delay-between-pages` at 2s
 or more, or spread a big list over time.
 
+## Traffic through a paid proxy
+
+A residential proxy bills per byte, so two things happen only while a
+LOCAL browser goes through `--proxy` / `--proxy-file` (or
+`INSTAGRAM_PROXY`). Neither applies with `--cdp-endpoint` (that browser
+brings its own exit and is billed on its own side) or with `--scraper-api`
+(no local proxy is used), or with no proxy, where nothing is metered.
+
+**Pre-check before the browser starts.** All three engines send ONE
+`HEAD https://www.instagram.com/robots.txt` through the exit the first URL
+would use, before launching a browser:
+
+- `407`: the gateway refused the credential, or the traffic balance is
+  exhausted. Exit `5`.
+- `402`: the proxy's traffic or balance is exhausted. Exit `5`.
+
+The message names `INSTAGRAM_PROXY` and never prints its value. The run
+writes `<out>.latest_attempt.meta.json` with `status: failed` and
+`stop_reason: proxy_auth_failed`, and leaves `<out>` and `<out>.meta.json`
+from an earlier run exactly as they were. Any other answer (a `200`, a
+`403` from the site, a timeout, a DNS error) is not a verdict on the proxy,
+and the run carries on exactly as before. It is one request, never retried
+and never rotated to another exit.
+
+**Media is not downloaded.** Every value comes from the JSON the page
+embeds, image and video URLs included, so images, video/audio and web fonts
+are aborted:
+
+| Engine | How | What still loads |
+|---|---|---|
+| Playwright | `context.route` by resource type | nothing of those three types |
+| Puppeteer | the CDP `Fetch` handler that already answers the proxy's password prompt fails them by resource type; with no password, a `Fetch` interception paused on those three types only | nothing of those three types |
+| Selenium | CDP `Network.setBlockedURLs` by file extension | an image or font served from a URL **without** an extension |
+
+`--load-media` keeps them. A `--dump-html` capture is unaffected, because
+it is the page's HTML. Playwright switches its HTTP cache off while a
+route is installed, so a script or stylesheet repeated across URLs is
+fetched again. Each browser context is new per URL anyway, so this costs
+little here. `<out>.meta.json` records `media_blocked`.
+
+Live comparison, 2026-10-20: `playwright_scraper.py --url natgeo` with no
+proxy, once as it is and once with blocking forced on, to compare the rows.
+It was not possible from this datacentre address: both runs got Instagram's
+login page (exit 3), the same as the datacentre measurement under
+[Known limitations](#known-limitations). The verification is therefore
+offline: the fixtures (the parser reads embedded JSON only), and each real
+browser driven through a local proxy to a test page. With blocking, only the
+HTML and the script went through the proxy, and the script still ran.
+
 ## Scraper API mode
 
 With `--scraper-api` no browser is driven: each page is one 2Captcha
@@ -228,7 +277,9 @@ solves spent, and a hash of the output file). With the options below it
 also lists the posts left out (`excluded_urls`), every post seen so far
 (`seen_post_skus`) and whether the run was incremental. A run that
 collects nothing writes neither, so it never replaces your previous good
-file.
+file. The one exception is a proxy refused at the pre-check (see
+[Traffic through a paid proxy](#traffic-through-a-paid-proxy)): that run
+records itself in `<out>.latest_attempt.meta.json`, a separate file.
 
 | Exit | Meaning |
 |---|---|
@@ -236,7 +287,7 @@ file.
 | `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `parse_error`, `proxy_pool_exhausted`) |
 | `3` | blocked or throttled, no rows |
 | `4` | no rows: every input was not found, or every post was older than `--since` or already collected by `--incremental-from` |
-| `5` | nothing could be read due to fetch, parse, or remote-service failure; no rows |
+| `5` | nothing could be read due to fetch, parse, or remote-service failure; no rows. Also a proxy that answered `407`/`402` at the pre-check, before any browser was started |
 | `2` | bad usage, including input where every line was skipped |
 | `1` | crash (a bug; please report it) |
 
@@ -358,6 +409,7 @@ the command line.
 | `--format` / `--out` | json / `instagram_results.<format>` | output format and path |
 | `--proxy` / `--proxy-file` / `--proxy-shuffle` | `INSTAGRAM_PROXY` | one proxy or a rotating pool, for a local browser |
 | `--proxy-block-retries` | 3 | blocked answers before that proxy is dropped from the pool |
+| `--load-media` | off | load images, video and fonts behind a proxy too (they are aborted by default there; see [Traffic through a paid proxy](#traffic-through-a-paid-proxy)) |
 | `--scraper-api` | off | no browser: fetch each page through 2Captcha's Scraper API (needs `TWOCAPTCHA_KEY`; routed through `INSTAGRAM_CDP_ENDPOINT` when set) — posts only, see [Scraper API mode](#scraper-api-mode) |
 | `--cdp-endpoint` | `INSTAGRAM_CDP_ENDPOINT` | connect to a Scraping Browser API profile instead of launching a browser |
 | `--solve-captcha` | when-blocked | `off` disables the Browser API's own captcha auto-solve; there is no local solver |

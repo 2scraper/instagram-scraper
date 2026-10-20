@@ -425,13 +425,14 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
                   engine_name=engine.name, urls=urls, fetched=queue[:args.max_results], started_at=started_at,
                   pages_completed=completed, failed_pages=failed_pages, failures=failures,
                   rate_limited=rate_limited, not_found=not_found,
-                  capped=len(queue) > args.max_results or posts_per_profile > 0, exclusions=exclusions)
+                  capped=len(queue) > args.max_results or posts_per_profile > 0, exclusions=exclusions,
+                  media_blocked=bool(getattr(engine, "media_blocked", False)))
 
 
 def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
            urls: List[str], started_at: float, pages_completed: int, failed_pages: List[int],
            failures=None, rate_limited=False, fetched: Optional[List[str]] = None, not_found=None,
-           capped: Optional[bool] = None, exclusions=None) -> int:
+           capped: Optional[bool] = None, exclusions=None, media_blocked: bool = False) -> int:
     budget = getattr(args, "_solve_budget", None)
     fetched = list(urls if fetched is None else fetched)
     selection = run_state.selection(args, urls)
@@ -439,6 +440,7 @@ def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bo
              "failed_urls": failures or [], "not_found_urls": not_found or [],
              "excluded_urls": exclusions or [], "incremental": bool(getattr(args, "incremental_from", None)),
              "post_window": "embedded_pinned_first" if getattr(args, "posts", 0) else None,
+             "media_blocked": bool(media_blocked),
              # A post's date never changes, so one before --since stays excluded:
              # remembering it spares the next delta a fetch that only drops it.
              "seen_post_skus": sorted(set(getattr(args, "_known_posts", set())) |
@@ -479,3 +481,63 @@ def validate_common(args, *, urls, skipped, print_err) -> Optional[int]:
         print_err(f"Error: {_redact(str(exc))}")
         return EXIT_BAD_USAGE
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Traffic savers behind a metered proxy (the helpers are in proxy_pool.py)
+# --------------------------------------------------------------------------- #
+# One HEAD for www.instagram.com/robots.txt, through the proxy, before a local
+# browser is launched. Short on purpose: a slow answer is not a verdict, and
+# the run then goes ahead exactly as it did before.
+PROXY_PRECHECK_TIMEOUT_S = 20.0
+
+
+def proxy_precheck(args, proxy_pool, *, urls: List[str], engine_name: str, started_at: float,
+                   print_err=None) -> Optional[int]:
+    """Pre-check the exit the first URL will use; return the exit code to
+    stop with, or None to go on.
+
+    A gateway 407 or 402 prints why (naming INSTAGRAM_PROXY, never its
+    value), writes `<out>.latest_attempt.meta.json` (status failed,
+    stop_reason proxy_auth_failed), leaves the output and `<out>.meta.json`
+    untouched, and returns exit 5. Never sent over --cdp-endpoint or
+    --scraper-api (no local proxy there) or without a proxy. Anything else —
+    a 200, a 403 from the site, a timeout — returns None: the run carries on
+    unchanged. One request, never retried and never rotated to another exit.
+    """
+    import sys
+    import output_writer
+    import proxy_pool as _savers
+    print_err = print_err or (lambda m: print(m, file=sys.stderr))
+    if proxy_pool is None or getattr(args, "cdp_endpoint", None) or getattr(args, "scraper_api", False):
+        return None
+    proxy = proxy_pool.peek()
+    if proxy is None or not urls:
+        return None
+    try:
+        _savers.precheck_proxy(proxy.url(), _savers.robots_url(urls[0]), timeout=PROXY_PRECHECK_TIMEOUT_S)
+    except _savers.ProxyPrecheckError as exc:
+        print_err(_savers.precheck_message(exc, "INSTAGRAM_PROXY", "www.instagram.com"))
+        try:
+            output_writer.write_failed_attempt(
+                args.out, stop_reason=_savers.PROXY_PRECHECK_STOP_REASON, engine=engine_name,
+                url=urls[0], pages_requested=len(urls), started_at=started_at,
+                transport_error="proxy pre-check: %s" % exc)
+        except OSError as write_exc:
+            # The verdict stands without its record: still exit 5, not a crash.
+            print_err("[!] could not write the attempt metadata: %s" % write_exc)
+        return output_writer.EXIT_REMOTE_API_ERROR
+    return None
+
+
+def add_media_arguments(parser) -> None:
+    """`--load-media` (documented) and the hidden `--force-block-media`."""
+    import argparse
+    parser.add_argument(
+        "--load-media", action="store_true",
+        help="Load images, video and web fonts. By default they are aborted while a local browser goes "
+             "through --proxy / --proxy-file (the parser reads the page's embedded JSON, and a proxy bills "
+             "per byte); nothing is blocked with --cdp-endpoint, --scraper-api or no proxy.")
+    # Turns blocking on without a proxy, so its effect on parsing can be
+    # measured for free. Not a user feature.
+    parser.add_argument("--force-block-media", action="store_true", help=argparse.SUPPRESS)
