@@ -29,6 +29,8 @@ from typing import List, Optional, Sequence
 # caller (CI, a cron job, another program) must be able to tell these apart
 # without parsing stdout.
 # --------------------------------------------------------------------------- #
+import proxy_meter
+
 EXIT_OK = 0
 EXIT_CRASH = 1
 EXIT_BAD_USAGE = 2
@@ -358,6 +360,34 @@ def write_failed_attempt(
         "transport_error": transport_error,
         "data_updated": False,
     }
+    meta.update(proxy_meter.sidecar())  # proxy_bytes / proxy_budget_bytes / proxy_budget_exceeded
+    path = f"{out_path}{ATTEMPT_META_SUFFIX}"
+    with _atomic(path) as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    proxy_meter.report()
+    return path
+
+
+def _write_attempt(out_path: str, *, status: str, stop_reason: str, engine: str, url: str, pages_requested: int,
+                   pages_completed: int, failed_pages: List[int], blocked: bool, started_at: float,
+                   extra: Optional[dict] = None) -> str:
+    """`<out>.latest_attempt.meta.json` for a proxied run that wrote no data."""
+    meta = {
+        "status": status,
+        "stop_reason": stop_reason,
+        "engine": engine,
+        "url": url,
+        "pages_requested": pages_requested,
+        "pages_completed": pages_completed,
+        "failed_pages": failed_pages or [],
+        "product_count": 0,
+        "started_at": started_at,
+        "finished_at": time.time(),
+        "blocked": bool(blocked),
+        "data_updated": False,
+    }
+    meta.update(proxy_meter.sidecar())
+    meta.update(extra or {})
     path = f"{out_path}{ATTEMPT_META_SUFFIX}"
     with _atomic(path) as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -398,6 +428,9 @@ def finish_run(
     NEVER overwrites a previous good output with an empty one unless the
     caller explicitly passed --allow-empty."""
     failed_pages = failed_pages or []
+    meter = proxy_meter.current()
+    if meter.exceeded:
+        incomplete_reason = proxy_meter.STOP_REASON
     partial = bool(failed_pages) or bool(incomplete_reason)
     zero_products = len(products) == 0
 
@@ -435,6 +468,11 @@ def finish_run(
     else:
         status, exit_code = "complete", EXIT_OK
         stop_reason = status
+    if meter.exceeded:
+        # The run stopped itself at --proxy-budget-mb: rows kept -> 6, none -> 5,
+        # whatever else the pages it did fetch said.
+        status, exit_code = ("remote_api_error", EXIT_REMOTE_API_ERROR) if zero_products else ("partial", EXIT_PARTIAL)
+        stop_reason = proxy_meter.STOP_REASON
 
     # The "never overwrite good output with empty" rule: a zero-product
     # outcome (whatever its status above — blocked/remote_api_error/empty
@@ -446,6 +484,13 @@ def finish_run(
     # engine's own logs carry the diagnostic detail — that's what a
     # failed run's output is FOR, not this file.
     if zero_products and not allow_empty:
+        if meter.active:
+            # Nothing is written, but what the proxy carried is still recorded
+            # (`<out>.latest_attempt.meta.json`; data and .meta.json untouched).
+            _write_attempt(out_path, status=status, stop_reason=stop_reason, engine=engine, url=url,
+                           pages_requested=pages_requested, pages_completed=pages_completed,
+                           failed_pages=failed_pages, blocked=blocked, started_at=started_at, extra=extra_meta)
+        proxy_meter.report()
         return exit_code
 
     escaped = write_output(products, out_path, fmt)
@@ -454,6 +499,7 @@ def finish_run(
         # Under the caller's extra, never over it: housekeeping must not
         # silently replace a value the engine chose to record.
         extra["csv_cells_escaped"] = escaped
+    extra.update(proxy_meter.sidecar())
     extra.update(extra_meta or {})
     if rejected_rows:
         extra["rejected_rows"] = rejected_rows
@@ -474,4 +520,5 @@ def finish_run(
         price_confirmed_pct=price_confirmed_pct, started_at=started_at,
         extra=extra or None,
     )
+    proxy_meter.report()
     return exit_code

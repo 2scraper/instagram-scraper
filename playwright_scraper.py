@@ -41,6 +41,7 @@ else:
 
 import env_config
 import page_flow
+import proxy_meter
 import scraper_api_engine
 import scraper_api_client
 import page_parser as pp
@@ -225,6 +226,10 @@ class _PlaywrightEngine:
         self.media_blocked = self.media_blocked or block
         context = await _new_context(self.browser, proxy, self.user_agent, reuse_default=reuse_default,
                                      block_media=block)
+        if proxy is not None and not reuse_default:
+            # Counted for --proxy-budget-mb; registered after the media route,
+            # so it is asked first and aborts everything once the budget is spent.
+            await proxy_meter.current().attach_playwright_async(context)
         page = await context.new_page()
         if self.autosolve:
             await _enable_scraping_browser_auto_solve(context, page)
@@ -266,6 +271,7 @@ async def run(args: argparse.Namespace) -> int:
     proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
     # Before any browser exists: a proxy that refuses its credential (407) or
     # has no traffic left (402) would refuse every request the browser makes.
+    page_flow.start_proxy_meter(args, proxy_pool)
     stop = page_flow.proxy_precheck(args, proxy_pool, urls=urls, engine_name=ENGINE_NAME, started_at=started_at)
     if stop is not None:
         return stop
