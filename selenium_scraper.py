@@ -52,6 +52,7 @@ else:
 
 import env_config
 import page_flow
+import proxy_meter
 import scraper_api_engine
 import page_parser as pp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
@@ -159,6 +160,9 @@ def _build_driver(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
                 proxy.host, proxy.port,
             )
         options.add_argument(f"--proxy-server={proxy.server_only()}")
+        # Chrome's performance log carries the CDP Network events that
+        # proxy_meter counts for --proxy-budget-mb.
+        proxy_meter.selenium_logging_prefs(options)
 
     if Service and _CHROMEDRIVER_PATH:
         service = Service(executable_path=_CHROMEDRIVER_PATH)
@@ -208,6 +212,7 @@ class _SeleniumSession:
         self.driver.set_page_load_timeout(NAV_TIMEOUT_S)
         self.driver.get(url)
         time.sleep(READINESS_WAIT_S)
+        proxy_meter.current().poll_selenium(self.driver)  # --proxy-budget-mb
         try:
             reported = self.driver.execute_script(_STATUS_JS)
             return int(reported) if reported else None
@@ -221,6 +226,7 @@ class _SeleniumSession:
         time.sleep(seconds)
 
     async def close(self) -> None:
+        proxy_meter.current().poll_selenium(self.driver)  # what the last page still loaded
         _quit(self.driver)
 
 
@@ -245,6 +251,8 @@ class _SeleniumEngine:
                 self.media_blocked = True
             except WebDriverException as exc:
                 log.warning("Could not block media over CDP (continuing with it): %s", str(exc).splitlines()[0][:200])
+        if proxy is not None and not self.args.cdp_endpoint:
+            proxy_meter.current().attach_selenium(driver, keep_entries=False)  # --proxy-budget-mb
         return _SeleniumSession(driver)
 
     async def sleep(self, seconds: float) -> None:
@@ -296,6 +304,7 @@ def run(args: argparse.Namespace) -> int:
     # has no traffic left (402) would refuse every request the browser makes.
     # Checked with the proxy as configured, credentials included: the
     # question is whether the proxy account itself is refused or exhausted.
+    page_flow.start_proxy_meter(args, proxy_pool)
     stop = page_flow.proxy_precheck(args, proxy_pool, urls=urls, engine_name=ENGINE_NAME, started_at=started_at)
     if stop is not None:
         return stop

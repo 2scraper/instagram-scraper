@@ -50,6 +50,7 @@ else:
 
 import env_config
 import page_flow
+import proxy_meter
 import scraper_api_engine
 import scraper_api_client
 import page_parser as pp
@@ -265,6 +266,8 @@ class _PyppeteerEngine:
         self.media_blocked = self.media_blocked or block
         page = await _open_page(browser, proxy=proxy, user_agent=self.user_agent, autosolve=self.autosolve,
                                 block_media=block)
+        if proxy is not None and self.remote_browser is None:
+            await proxy_meter.current().attach_pyppeteer(page)  # --proxy-budget-mb
         return _PyppeteerSession(page, browser, owns_browser=self.remote_browser is None)
 
     async def sleep(self, seconds: float) -> None:
@@ -325,6 +328,7 @@ async def run(args: argparse.Namespace) -> int:
         proxy_pool = None
     # Before any browser exists: a proxy that refuses its credential (407) or
     # has no traffic left (402) would refuse every request the browser makes.
+    page_flow.start_proxy_meter(args, proxy_pool)
     stop = page_flow.proxy_precheck(args, proxy_pool, urls=urls, engine_name=ENGINE_NAME, started_at=started_at)
     if stop is not None:
         return stop

@@ -210,7 +210,7 @@ or more, or spread a big list over time.
 
 ## Traffic through a paid proxy
 
-A residential proxy bills per byte, so two things happen only while a
+A residential proxy bills per byte, so three things happen only while a
 LOCAL browser goes through `--proxy` / `--proxy-file` (or
 `INSTAGRAM_PROXY`). Neither applies with `--cdp-endpoint` (that browser
 brings its own exit and is billed on its own side) or with `--scraper-api`
@@ -257,6 +257,33 @@ offline: the fixtures (the parser reads embedded JSON only), and each real
 browser driven through a local proxy to a test page. With blocking, only the
 HTML and the script went through the proxy, and the script still ran.
 
+**A traffic budget.** Every byte a local browser sends or receives through
+the proxy is counted, and `--proxy-budget-mb` (default `10`; `0` =
+unlimited) caps a run. Once the running total passes the budget, no
+further URL (and no further `--posts` post) is fetched, the browser aborts
+any request it still tries, the rows already read are kept, and the run
+ends with `stop_reason: proxy_budget_exceeded`: exit 6 with rows, 5
+without. The URLs not fetched are listed as `not_attempted`, so a `--checkpoint` run can
+`--resume` them. It never goes on silently. At the end of a proxied run one
+line is printed, e.g. `Proxy traffic: 3.2 MB of 10 MB budget`, and the
+sidecar records `proxy_bytes`, `proxy_budget_bytes` and
+`proxy_budget_exceeded` (`null` / `null` / `false` when no local proxy was
+used). A proxied run that writes no rows records them in
+`<out>.latest_attempt.meta.json`, leaving `<out>` and `<out>.meta.json` as
+they were.
+
+The count is an estimate of the tunnelled payload — request line, headers
+and body sent, response headers and body as received (compressed) — not
+the proxy's invoice: TLS records, the `CONNECT` exchange, WebSocket frames
+and Chrome's own background requests are not visible to it, so the bill is
+a few per cent higher. 1 MB = 1,000,000 bytes.
+
+| Engine | Counted from |
+|---|---|
+| Playwright | `request.sizes()` of every finished or failed request (request headers + body, response headers + body) |
+| Puppeteer | CDP `Network.loadingFinished.encodedDataLength` of every response that came over the network, plus each request's line, headers and body (`Network.requestWillBeSent`) |
+| Selenium | the same CDP events, from Chrome's performance log (turned on behind a local proxy only) |
+
 ## Scraper API mode
 
 With `--scraper-api` no browser is driven: each page is one 2Captcha
@@ -277,17 +304,18 @@ solves spent, and a hash of the output file). With the options below it
 also lists the posts left out (`excluded_urls`), every post seen so far
 (`seen_post_skus`) and whether the run was incremental. A run that
 collects nothing writes neither, so it never replaces your previous good
-file. The one exception is a proxy refused at the pre-check (see
-[Traffic through a paid proxy](#traffic-through-a-paid-proxy)): that run
-records itself in `<out>.latest_attempt.meta.json`, a separate file.
+file. The exceptions are a proxy refused at the pre-check, and any run
+through a local proxy that collects nothing (see
+[Traffic through a paid proxy](#traffic-through-a-paid-proxy)): those runs
+record themselves in `<out>.latest_attempt.meta.json`, a separate file.
 
 | Exit | Meaning |
 |---|---|
 | `0` | complete |
-| `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `parse_error`, `proxy_pool_exhausted`) |
+| `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `parse_error`, `proxy_pool_exhausted`, `proxy_budget_exceeded`) |
 | `3` | blocked or throttled, no rows |
 | `4` | no rows: every input was not found, or every post was older than `--since` or already collected by `--incremental-from` |
-| `5` | nothing could be read due to fetch, parse, or remote-service failure; no rows. Also a proxy that answered `407`/`402` at the pre-check, before any browser was started |
+| `5` | nothing could be read due to fetch, parse, or remote-service failure; no rows. Also a proxy that answered `407`/`402` at the pre-check, before any browser was started, and a proxy budget that ran out before any row was read |
 | `2` | bad usage, including input where every line was skipped |
 | `1` | crash (a bug; please report it) |
 
@@ -410,6 +438,7 @@ the command line.
 | `--proxy` / `--proxy-file` / `--proxy-shuffle` | `INSTAGRAM_PROXY` | one proxy or a rotating pool, for a local browser |
 | `--proxy-block-retries` | 3 | blocked answers before that proxy is dropped from the pool |
 | `--load-media` | off | load images, video and fonts behind a proxy too (they are aborted by default there; see [Traffic through a paid proxy](#traffic-through-a-paid-proxy)) |
+| `--proxy-budget-mb` | 10 | stop once this many MB went through a local proxy; `0` = unlimited (see [Traffic through a paid proxy](#traffic-through-a-paid-proxy)) |
 | `--scraper-api` | off | no browser: fetch each page through 2Captcha's Scraper API (needs `TWOCAPTCHA_KEY`; routed through `INSTAGRAM_CDP_ENDPOINT` when set) — posts only, see [Scraper API mode](#scraper-api-mode) |
 | `--cdp-endpoint` | `INSTAGRAM_CDP_ENDPOINT` | connect to a Scraping Browser API profile instead of launching a browser |
 | `--solve-captcha` | when-blocked | `off` disables the Browser API's own captcha auto-solve; there is no local solver |
