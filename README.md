@@ -1,4 +1,4 @@
-# instagram-scraper
+# Instagram Scraper — Public Profiles, Posts and Reels in Python
 
 ![release](https://img.shields.io/github/v/release/2scraper/instagram-scraper?sort=semver)
 ![tests](https://github.com/2scraper/instagram-scraper/actions/workflows/tests.yml/badge.svg)
@@ -7,6 +7,8 @@
 ![licence](https://img.shields.io/badge/licence-MIT-green)
 ![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)
 ![no login](https://img.shields.io/badge/runs%20without-an%20account-success)
+
+**Instagram scraper** — an open-source (MIT) Python tool that reads public instagram.com profile, post and Reel pages without logging in and writes profiles (name, bio, followers, following) and posts (date, likes, comments, caption, media URLs) to JSON or CSV. It was verified live on 2026-10-04 from an ordinary residential IP with no key and no proxy. Use it to track public accounts' follower and engagement figures, or compare two runs with `diff_runs.py`.
 
 **Scrape public Instagram profiles and posts into clean JSON or CSV, without
 logging in.** Give it a username, a profile URL, a post or Reel URL, or a
@@ -519,6 +521,23 @@ offline suite on Python 3.9 and 3.12, installs the built wheel outside
 the checkout, builds the Docker image and launches Chromium in it, and
 runs each engine in its own virtualenv. `TESTING.md` describes live
 testing; `CHANGELOG.md` has the history.
+
+## Guides
+
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Snapchat scraper](https://github.com/2scraper/snapchat-scraper) — Public Snapchat profiles, Spotlight engagement and story…
+- [TikTok Ad Library scraper](https://github.com/2scraper/tiktok-ads-scraper) — Ads from TikTok's EU Ad Library
+- [TikTok Profile scraper](https://github.com/2scraper/tiktok-profile-scraper) — Exact follower, like and video counts, bio, verification…
+- [TikTok Video scraper](https://github.com/2scraper/tiktok-video-scraper) — TikTok videos with exact engagement, sound, hashtags…
+- [Weibo scraper](https://github.com/2scraper/weibo-scraper) — Hot feed, account timelines and post comments…
+- [YouTube scraper](https://github.com/2scraper/youtube-scraper) — Comment threads, replies, video metadata and search
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## Licence
 
