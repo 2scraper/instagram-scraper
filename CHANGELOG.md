@@ -98,8 +98,7 @@ that changes a default is called out at the top of its entry.
 
 ### Fixed
 
-Found in a manual QA pass of `main` @ 6764b74 (2026-10-25 to 11-05); each has a
-test in `tests/test_qa_fixes.py`.
+Each fix has a regression test in `tests/test_v040_fixes.py`.
 
 - A `--proxy-file` with only blank or `#` lines silently ran from this
   machine's own address; a missing one gave a traceback (see above).

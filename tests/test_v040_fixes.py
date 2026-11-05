@@ -1,4 +1,4 @@
-"""Regression tests for the manual-QA findings of 2026-10-25..11-05 (one test per finding, numbered as in the QA report)."""
+"""Regression tests for the bugs fixed in 0.4.0 (one test per bug)."""
 import argparse
 import asyncio
 import contextlib
@@ -73,7 +73,7 @@ def profile_page(username, codes):
 
 class FakeEngine:
     """page_flow.Engine over a dict url -> html; `fail` maps a proxy host to an exception for its navigations."""
-    name = 'qa'
+    name = 'fake'
     readiness_s = 0
 
     def __init__(self, pages, fail=None):
