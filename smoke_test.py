@@ -1802,7 +1802,7 @@ def _():
             assert rc == want and meta["stop_reason"] == "proxy_budget_exceeded", (blocked, failed, rc, meta)
             assert meta["proxy_budget_exceeded"] is True and meta["proxy_bytes"] == 5000, meta
         # Crossed while the LAST page loaded, with every page read: nothing was
-        # left unread, so the run is complete (QA 2026-10-25: a 13/13 run was
+        # left unread, so the run is complete (found 2026-10-25: a 13/13 run was
         # marked partial and diff_runs then refused it).
         proxy_meter.start(0.001, active=True)
         proxy_meter.current().add(5000)
