@@ -36,12 +36,14 @@ class Engine:
         self.pages = pages or {USER: PROFILE, P1: POST, P2: POST.replace(CODE, 'Abcdef12345')}
         self.interrupt = interrupt
         self.statuses = statuses or {}
-        self.asked, self.proxies = [], []
+        self.asked, self.proxies, self.raw_asked = [], [], []
     async def open(self, proxy):
         self.proxies.append(proxy)
         engine = self
         class Session:
             async def goto(self, url):
+                engine.raw_asked.append(url)
+                url = url.removesuffix('?hl=en')  # page_flow pins the page language (pp.fetch_url)
                 self.url = url
                 engine.asked.append(url)
                 if url == engine.interrupt:
@@ -118,7 +120,7 @@ class Monitoring(unittest.TestCase):
         self.assertEqual((code, len(rows), eng.asked), (0, 1, [USER]))
         self.assertTrue(meta['incremental'])
         self.assertEqual(meta['excluded_urls'][0]['reason'], 'already_seen')
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(diff_runs.DiffError):
             diff_runs.diff(args.out, args.out)
     def test_incremental_does_not_refetch_posts_before_since(self):
         base = self.args('--since', '2099-01-01', name='base'); self.run_flow(base, [USER, P1])

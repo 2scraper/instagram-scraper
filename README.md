@@ -147,10 +147,11 @@ that does not apply to a row's kind is `null`.
 | `like_count`, `comment_count` | as the site reports them; `like_count` is `null` when the author hides likes (`likes_hidden` true) |
 | `media_type` / `product_type` | `image`, `video` or `carousel` / the site's own `feed`, `clips`, `carousel_container` |
 | `caption`, `hashtags_json`, `mentions_json` | the full caption, and the `#tags` and `@handles` in it |
-| `alt_text` | Instagram's own accessibility description of the media |
+| `alt_text` | Instagram's own accessibility description of the media, always in English (every page is opened with `?hl=en`, whatever the browser's, the OS's or the exit's language) |
 | `coauthors_json`, `tagged_users_json` | usernames of collaborators and of accounts tagged in the media |
 | `media_count`, `media_urls_json`, `video_url` | slides in a carousel (1 otherwise), each slide's image or video URL, the video of a Reel |
 | `width`, `height` | the original media's size |
+| `location_name`, `location_id`, `location_lat`, `location_lng` | the post's geotag, when it has one (most posts do not: `null`) |
 | `brand`, `price`, `currency`, `price_source` | always `null`: the columns keep the row layout shared with the other 2scraper repos |
 
 Media URLs are Instagram's signed CDN links: they expire after a few days,
@@ -260,14 +261,18 @@ browser driven through a local proxy to a test page. With blocking, only the
 HTML and the script went through the proxy, and the script still ran.
 
 **A traffic budget.** Every byte a local browser sends or receives through
-the proxy is counted, and `--proxy-budget-mb` (default `10`; `0` =
-unlimited) caps a run. Once the running total passes the budget, no
+the proxy is counted, and `--proxy-budget-mb` (default `50`; `0` =
+unlimited) caps a run. With media blocked one page cost 0.8-2.5 MB through
+a proxy (measured 2026-10-25 and 2026-11-02), so the default covers
+`--url natgeo --posts 12` (13 pages). Once the running total passes the budget, no
 further URL (and no further `--posts` post) is fetched, the browser aborts
 any request it still tries, the rows already read are kept, and the run
 ends with `stop_reason: proxy_budget_exceeded`: exit 6 with rows, 5
 without. The URLs not fetched are listed as `not_attempted`, so a `--checkpoint` run can
-`--resume` them. It never goes on silently. At the end of a proxied run one
-line is printed, e.g. `Proxy traffic: 3.2 MB of 10 MB budget`, and the
+`--resume` them. It never goes on silently. A budget crossed while the
+last page loads, with every page read, leaves the run `complete` (exit 0;
+the sidecar still says `proxy_budget_exceeded: true`). At the end of a proxied run one
+line is printed, e.g. `Proxy traffic: 3.2 MB of 50 MB budget`, and the
 sidecar records `proxy_bytes`, `proxy_budget_bytes` and
 `proxy_budget_exceeded` (`null` / `null` / `false` when no local proxy was
 used). A proxied run that writes no rows records them in
@@ -292,10 +297,12 @@ With `--scraper-api` no browser is driven: each page is one 2Captcha
 Scraper API call (`TWOCAPTCHA_KEY` in `.env`), routed through the
 Scraping Browser profile in `INSTAGRAM_CDP_ENDPOINT` when one is set.
 Measured on 2026-10-04 on the Scraper API's own pool: **posts and Reels
-read fully (3 of 3), profiles did not** — all four profiles tried got
-Instagram's login page, reported as blocked. Use it for post URLs; read
-profiles with a browser engine. A refused key or an empty balance stops
-the run at once with exit 5.
+read fully (3 of 3), profiles mostly did not** — all four profiles tried got
+Instagram's login page, reported as blocked (on 2026-11-02 one profile did
+read). Use it for post URLs; read profiles with a browser engine, or route
+`--scraper-api` through a Scraping Browser profile (`INSTAGRAM_CDP_ENDPOINT`):
+measured 2026-11-02 and 11-05, profiles and posts read fully that way. A
+refused key or an empty balance stops the run at once with exit 5.
 
 ## Run results and exit codes
 
@@ -315,10 +322,11 @@ record themselves in `<out>.latest_attempt.meta.json`, a separate file.
 |---|---|
 | `0` | complete |
 | `6` | partial: rows were written, but the run did not finish cleanly — `stop_reason` says why (`blocked`, `rate_limited`, `remote_api_error`, `failed_pages`, `parse_error`, `proxy_pool_exhausted`, `proxy_budget_exceeded`) |
+| `130` / `143` | interrupted by Ctrl-C / SIGTERM (`docker stop`): the URL in hand is finished, the rows read so far are written as `partial` with `stop_reason: interrupted`, and a `--checkpoint` run can `--resume`. A second Ctrl-C stops at once |
 | `3` | blocked or throttled, no rows |
 | `4` | no rows: every input was not found, or every post was older than `--since` or already collected by `--incremental-from` |
 | `5` | nothing could be read due to fetch, parse, or remote-service failure; no rows. Also a proxy that answered `407`/`402` at the pre-check, before any browser was started, and a proxy budget that ran out before any row was read |
-| `2` | bad usage, including input where every line was skipped |
+| `2` | bad usage, found before anything is fetched: input where every line was skipped, both `--url` and `--urls-file`, an `--out` whose directory is missing or that would overwrite an input, a `--max-results` below the number of inputs, an unreadable or empty `--proxy-file`, a proxy the engine cannot log in to (a SOCKS proxy with a login; any proxy with a login on Selenium) |
 | `1` | crash (a bug; please report it) |
 
 ## Monitoring changes
@@ -338,7 +346,10 @@ hidden-likes flags. A number that changed also gets its `delta`; a value
 missing on one side is shown as missing, never counted as zero.
 `--fields` narrows the list, and a JSON run can be compared with a CSV
 one. `--fail-on-change` exits 1 when a watched field changed or a row
-appeared or disappeared.
+appeared or disappeared. A comparison that cannot be made (a missing file
+or `.meta.json`, a partial run, another selection — see below) exits 2,
+with or without `--fail-on-change`, so a cron job can tell a change from a
+broken check.
 
 A run with `--posts` sees only the 12 posts the profile page embeds, so a
 post can drop out of that window without being deleted. Such a row is
@@ -347,7 +358,8 @@ the new run itself found its URL gone: a deleted post, or a deleted or
 renamed profile.
 
 The diff refuses comparisons that would mislead: runs with different
-inputs, `--posts`, `--max-results` or `--since`; a run that did not
+inputs, `--posts`, `--max-results` or `--since` (`--allow-different-scope`
+compares them anyway, when you know what differs); a run that did not
 complete; a `.meta.json` that does not match its file; and
 `--incremental-from` runs, which hold only the new posts. To monitor
 engagement, keep taking full runs.
@@ -391,6 +403,10 @@ and caption stay as first collected, so keep full runs if you track
 engagement. And `--max-results` counts skipped posts too: it limits the
 pages selected, not the new posts found.
 
+`--max-results` never drops an input: a cap below the number of inputs is
+refused (exit 2), and the cap trims only posts found by `--posts`, each
+listed in `excluded_urls` as `max_results` (with a warning in the log).
+
 Left-out posts are listed in `excluded_urls` (`already_seen`,
 `before_since`). If nothing is left to collect, the run exits 4 and,
 without `--allow-empty`, leaves the previous output file alone.
@@ -400,7 +416,8 @@ without `--allow-empty`, leaves the previous output file alone.
 ```bash
 python3 playwright_scraper.py --url natgeo --posts 12 --checkpoint progress.json --out results.json
 
-# after Ctrl-C, a crash or a partial run: the same flags, plus --resume
+# after Ctrl-C (the URL in hand is finished and the rows so far are written),
+# a crash or a partial run: the same flags, plus --resume
 python3 playwright_scraper.py --url natgeo --posts 12 --checkpoint progress.json --resume --out results.json
 ```
 
@@ -423,31 +440,33 @@ does hold the collected rows: keep it where you keep the results.
 
 ## Options
 
-Same flags for all three engines. Credentials go in `.env`
-(`TWOCAPTCHA_KEY`, `INSTAGRAM_PROXY`, `INSTAGRAM_CDP_ENDPOINT`), never on
-the command line.
+Same flags for all three engines. Credentials belong in `.env`
+(`TWOCAPTCHA_KEY`, `INSTAGRAM_PROXY`, `INSTAGRAM_CDP_ENDPOINT`): a value on
+the command line ends up in shell history and in `ps` for every user of
+the machine. `--twocaptcha-key` exists for a one-off test.
 
 | Option | Default | |
 |---|---|---|
-| `--url` / `--urls-file` | | what to scrape: a username, `@username`, profile URL, post or Reel URL; a file has one per line |
+| `--url` / `--urls-file` | | what to scrape (one or the other): a username (`nasa`, `@nasa`, `nasa/`), a profile, post or Reel URL (`instagram.com`, `m.instagram.com` or `instagr.am`); a file has one per line, UTF-8 with or without a BOM |
 | `--posts` | 0 | also fetch the first N posts the profile page embeds, 0-12, pinned first |
-| `--max-results` | 100 | URLs to select in total, profiles and posts together; posts skipped by `--incremental-from` count too |
+| `--max-results` | 100 | URLs to select in total, profiles and posts together; never fewer than the inputs (posts are what it trims); posts skipped by `--incremental-from` count too |
 | `--since` | | keep only posts from this date or ISO time on (UTC without a timezone); profiles are always kept |
 | `--incremental-from` | | an earlier complete run with the same selection: refresh profiles, skip the posts it already has |
 | `--checkpoint` / `--resume` | / off | save progress after each URL / continue from that checkpoint |
 | `--delay-between-pages` | 2s | pause between URLs |
 | `--format` / `--out` | json / `instagram_results.<format>` | output format and path |
-| `--proxy` / `--proxy-file` / `--proxy-shuffle` | `INSTAGRAM_PROXY` | one proxy or a rotating pool, for a local browser |
-| `--proxy-block-retries` | 3 | blocked answers before that proxy is dropped from the pool |
+| `--proxy` / `--proxy-file` / `--proxy-shuffle` | `INSTAGRAM_PROXY` | one proxy or a rotating pool, for a local browser. Every exit of a pool is pre-checked; one refused (`407`/`402`) is dropped, and the run stops only when none is left |
+| `--proxy-block-retries` | 3 | blocked answers or failed navigations before that proxy is dropped from the pool; with more than one exit left, a failed navigation is retried through the next one |
 | `--load-media` | off | load images, video and fonts behind a proxy too (they are aborted by default there; see [Traffic through a paid proxy](#traffic-through-a-paid-proxy)) |
-| `--proxy-budget-mb` | 10 | stop once this many MB went through a local proxy; `0` = unlimited (see [Traffic through a paid proxy](#traffic-through-a-paid-proxy)) |
+| `--proxy-budget-mb` | 50 | stop once this many MB went through a local proxy; `0` = unlimited (see [Traffic through a paid proxy](#traffic-through-a-paid-proxy)) |
 | `--scraper-api` | off | no browser: fetch each page through 2Captcha's Scraper API (needs `TWOCAPTCHA_KEY`; routed through `INSTAGRAM_CDP_ENDPOINT` when set) — posts only, see [Scraper API mode](#scraper-api-mode) |
 | `--cdp-endpoint` | `INSTAGRAM_CDP_ENDPOINT` | connect to a Scraping Browser API profile instead of launching a browser |
 | `--solve-captcha` | when-blocked | `off` disables the Browser API's own captcha auto-solve; there is no local solver |
 | `--max-solves` / `--min-score` | 8 / 0.3 | kept for the local solver, which is disabled; they change nothing today |
 | `--retries` / `--retry-delay` | 2 / 3s | navigation retries per URL |
-| `--fingerprint` / `--fp-tags` / `--fp-country` | off | apply a 2Captcha Fingerprint API user agent (local browsers only) |
-| `--dump-html` | off | save each page's HTML next to the output, for debugging |
+| `--fingerprint` / `--fp-tags` / `--fp-country` | off | apply a 2Captcha Fingerprint API user agent (local browsers only). Only a desktop-Chrome profile is used (a phone's gets Instagram's mobile layout), and its Chrome version is set to the browser that runs |
+| `--twocaptcha-key` / `--captcha-api` | `TWOCAPTCHA_KEY` / 2Captcha | the 2Captcha key (prefer `.env`) / another API base URL, for testing only |
+| `--dump-html` | off | save each page's HTML next to the output, for debugging (a failed save is only a warning) |
 | `--allow-empty` | off | write an output file even when nothing was found |
 | `--headless` / `--headful` | headless | show the browser window |
 
@@ -461,12 +480,17 @@ another site) is logged and skipped, never requested. Run any engine with
 - **Puppeteer** (`puppeteer_scraper.py`, via pyppeteer) supports the same
   modes. pyppeteer itself is no longer maintained, and its own proxy login
   no longer works on current Chromium, so this engine answers the proxy's
-  password prompt itself (over CDP `Fetch`).
+  password prompt itself (over CDP `Fetch`). pyppeteer's own Chromium
+  download is an x86_64 build that does not start on Apple Silicon, so
+  there an installed Google Chrome or Chromium from `/Applications` is
+  used; anywhere else, point `PYPPETEER_EXECUTABLE_PATH` at a Chrome or
+  Chromium binary to use it instead of the download.
 - **Selenium** (`selenium_scraper.py`) runs a local Chrome only.
   chromedriver cannot authenticate a Scraping Browser endpoint (the run
   exits 2 before fetching; use `--scraper-api` instead), and its
-  `--proxy-server` cannot use a proxy password (the credentials are
-  stripped, with a warning).
+  `--proxy-server` cannot use a proxy password: a proxy with a login is
+  refused (exit 2) — use Playwright or Puppeteer for it, or a proxy that
+  allows your IP without one.
 
 Install one engine per virtualenv (`requirements-playwright.txt`,
 `requirements-puppeteer.txt`, `requirements-selenium.txt`). Their
@@ -475,7 +499,9 @@ dependencies conflict with each other.
 All three engines share one fetch loop (`page_flow.py`), so they agree on
 results, exit codes and when money is spent. Docker:
 `docker build -t instagram-scraper .` gives an image with Playwright and
-Chromium.
+Chromium. `docker stop` sends SIGTERM and kills after 10 seconds; give the
+URL in hand time to finish and the rows to be written with
+`docker stop -t 60`.
 
 ## Known limitations
 
@@ -491,10 +517,9 @@ Chromium.
 - **Private profiles** give a profile row with `is_private: true` and no
   posts (seen live on 2026-10-04: `@vogue` is a private "Vogue Covers"
   account; the magazine is `@voguemagazine`).
-- **No location.** The post's location field was empty on all 36
-  distinct posts of the live runs above, including 12 from a travel
-  account, so there is no `location` column. If you find a logged-out
-  post page that carries one, please open an issue with its URL.
+- **Location only when the post has one.** Most posts carry none (36 of 36
+  in the 2026-10-04 runs); a geotagged one, e.g. `/p/De5mVMikVB-/`, gives
+  `location_name`, `location_id`, `location_lat` and `location_lng`.
 - **A datacentre address may get the login page from the first request.**
   Measured once, 2026-10-15: a GitHub-hosted runner got the login page for
   the very first request (`natgeo`, exit 3). A residential proxy is the fix.
@@ -511,7 +536,7 @@ it, and do not use it to track individuals.
 ## Development
 
 ```bash
-python3 smoke_test.py            # 63 offline checks, no network, no engine needed
+python3 smoke_test.py            # offline checks, no network, no engine needed
 python3 .github/ci_checks.py     # credential scan
 python3 -m unittest discover -s tests -p 'test_*.py'  # failure, recovery, monitoring and resume scenarios
 ```

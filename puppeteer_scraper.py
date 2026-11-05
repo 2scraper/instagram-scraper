@@ -17,8 +17,10 @@ recommendation to prefer it.
 
 Chromium binary: sourced from `PYPPETEER_EXECUTABLE_PATH` /
 `PUPPETEER_EXECUTABLE_PATH` if set (handy for reusing an existing
-Playwright/system Chromium instead of pyppeteer's own bundled download),
-otherwise pyppeteer's own default.
+Playwright/system Chromium instead of pyppeteer's own bundled download);
+on Apple Silicon an installed Google Chrome or Chromium from
+/Applications (pyppeteer's own download is x86_64 and does not start
+there); otherwise pyppeteer's own default.
 
 Same input and the same shared loop as playwright_scraper.py
 (`page_flow.run`); this file only provides the pyppeteer page session.
@@ -32,6 +34,7 @@ import argparse
 import asyncio
 import logging
 import os
+import platform
 import sys
 import time
 from typing import Optional
@@ -55,9 +58,8 @@ import scraper_api_engine
 import scraper_api_client
 import page_parser as pp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
-from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
-from proxy_pool import (BLOCKED_CDP_RESOURCE_TYPES, Proxy, ProxyPool, ProxyParseError, load_proxies, pyppeteer_block_media,
-                        redact_credentials, should_block_media)
+from fingerprint_client import align_user_agent, choose_user_agent, refuse_if_cdp
+from proxy_pool import BLOCKED_CDP_RESOURCE_TYPES, Proxy, pyppeteer_block_media, redact_credentials, should_block_media
 from scraper_api_client import TwoCaptchaClient
 
 ENGINE_NAME = "puppeteer"
@@ -67,7 +69,28 @@ CDP_CONNECT_TIMEOUT_S = 60
 
 log = logging.getLogger("puppeteer_scraper")
 
-_CHROMIUM_EXECUTABLE = os.environ.get("PYPPETEER_EXECUTABLE_PATH") or os.environ.get("PUPPETEER_EXECUTABLE_PATH")
+# pyppeteer's own Chromium download is an x86_64 build: on Apple Silicon it
+# dies at launch ("Browser closed unexpectedly", measured 2026-10-25). There,
+# without an explicit path, an installed Chrome or Chromium is used instead.
+_MAC_BROWSERS = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+)
+
+
+def _find_executable() -> Optional[str]:
+    explicit = os.environ.get("PYPPETEER_EXECUTABLE_PATH") or os.environ.get("PUPPETEER_EXECUTABLE_PATH")
+    if explicit:
+        return explicit
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return next((path for path in _MAC_BROWSERS if os.path.exists(path)), None)
+    return None
+
+
+_CHROMIUM_EXECUTABLE = _find_executable()
+_LAUNCH_HINT = ("Set PYPPETEER_EXECUTABLE_PATH to an installed Chrome/Chromium "
+                "(on a Mac: \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\").")
 
 
 _positive_int = page_flow.positive_int
@@ -80,7 +103,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="instagram.com public profile and post scraper (logged out) — pyppeteer (Puppeteer) engine",
         epilog="Credentials belong in .env / INSTAGRAM_PROXY / TWOCAPTCHA_KEY — never on this command line.",
     )
-    p.add_argument("--url", default=None, help="One profile, post or Reel URL, @username or bare username (or set INSTAGRAM_URL) — overrides --urls-file")
+    p.add_argument("--url", default=None, help="One profile, post or Reel URL, @username or bare username (or set INSTAGRAM_URL); not together with --urls-file")
     p.add_argument("--urls-file", default=None)
     p.add_argument("--posts", type=int, default=0, metavar="N", help="Also fetch each profile's N most recent posts (0-12; a logged-out profile page embeds 12, pinned first)")
     p.add_argument("--max-results", type=_positive_int, default=100)
@@ -134,7 +157,13 @@ async def _launch(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
     kwargs = dict(headless=headless, args=args)
     if _CHROMIUM_EXECUTABLE:
         kwargs["executablePath"] = _CHROMIUM_EXECUTABLE
-    return await pyppeteer_launch(**kwargs)
+    elif sys.platform == "darwin" and platform.machine() == "arm64":
+        log.warning("No Chrome/Chromium found in /Applications — pyppeteer's own x86_64 Chromium usually fails to "
+                    "start on Apple Silicon. " + _LAUNCH_HINT)
+    try:
+        return await pyppeteer_launch(**kwargs)
+    except Exception as exc:  # noqa: BLE001 — re-raised with the fix attached
+        raise RuntimeError(f"{exc} — {_LAUNCH_HINT}") from None
 
 
 async def _authenticate_if_needed(page, proxy: Optional[Proxy], *, block_media: bool = False) -> None:
@@ -215,7 +244,7 @@ async def _open_page(browser, *, proxy: Optional[Proxy], user_agent: Optional[st
                      block_media: bool = False):
     page = await browser.newPage()
     if user_agent:
-        await page.setUserAgent(user_agent)
+        await page.setUserAgent(align_user_agent(user_agent, await browser.version()))
     await _authenticate_if_needed(page, proxy, block_media=block_media)
     if autosolve:
         await _enable_scraping_browser_auto_solve(page)
@@ -311,21 +340,16 @@ async def run(args: argparse.Namespace) -> int:
     if args.scraper_api:
         args.out = args.out or _default_out(args.format)
         return await scraper_api_engine.run(args, urls=urls, started_at=started_at)
+    args.out = args.out or _default_out(args.format)
+
+    # Usage problems first: they need no browser to be found.
+    proxy_pool, stop = page_flow.load_proxy_pool(args)
+    if stop is not None:
+        return stop
     if pyppeteer_launch is None:
         print(f"Error: pyppeteer is not installed ({_PYPPETEER_IMPORT_ERROR}). "
               f"pip install -r requirements-puppeteer.txt", file=sys.stderr)
         return EXIT_CRASH
-    args.out = args.out or _default_out(args.format)
-
-    try:
-        proxies = load_proxies(args.proxy, args.proxy_file)
-    except ProxyParseError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_BAD_USAGE
-    proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
-    if args.cdp_endpoint and proxy_pool is not None:
-        log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
-        proxy_pool = None
     # Before any browser exists: a proxy that refuses its credential (407) or
     # has no traffic left (402) would refuse every request the browser makes.
     page_flow.start_proxy_meter(args, proxy_pool)
@@ -341,11 +365,9 @@ async def run(args: argparse.Namespace) -> int:
         if client is None:
             log.warning("--fingerprint requested but no --twocaptcha-key/TWOCAPTCHA_KEY set — continuing without one.")
         else:
-            profile = fetch_fingerprint(client, tags=args.fp_tags, country=args.fp_country)
-            if profile:
-                user_agent = user_agent_from(profile)
-                if user_agent:
-                    log.info("Fingerprint applied: user agent %s", user_agent)
+            user_agent = choose_user_agent(client, tags=args.fp_tags, country=args.fp_country)
+            if user_agent:
+                log.info("Fingerprint applied (Chrome version set to the browser's): %s", user_agent)
 
     remote_browser = None
     try:
@@ -374,12 +396,16 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = build_arg_parser().parse_args()
     args = env_config.apply_env(args)
+    # pyppeteer logs "Browser listening on: ws://..." and "terminate chrome
+    # process..." at INFO for every URL: noise, not progress.
+    logging.getLogger("pyppeteer").setLevel(logging.WARNING)
+    page_flow.STOP.install()
     try:
         # asyncio.run(), not get_event_loop(): the latter raises in any
         # process that already ran and closed a loop (seen on a sibling repo).
         return asyncio.run(run(args))
     except KeyboardInterrupt:
-        return EXIT_CRASH
+        return page_flow.interrupted_exit(args)
 
 
 if __name__ == "__main__":

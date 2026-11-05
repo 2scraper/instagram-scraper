@@ -11,8 +11,9 @@ Same hard engine limits as the rest of the family:
     is refused outright here with EXIT_BAD_USAGE — no half-working
     attempt — with a pointer to playwright_scraper.py / puppeteer_scraper.py.
   - Selenium's `--proxy-server` CANNOT authenticate at all. A `--proxy`
-    with a login/password has its credentials stripped before being handed
-    to Chrome, and this engine WARNS rather than silently dropping them.
+    (or a `--proxy-file` line) with a login/password is refused with
+    EXIT_BAD_USAGE before Chrome starts — stripping the login would only
+    turn every page into a 407.
 
 Chrome binary: normally auto-detected by Selenium/Selenium Manager from a
 regular Chrome/Chromium install. Set `CHROME_BIN` or `SELENIUM_CHROME_BIN`
@@ -56,8 +57,8 @@ import proxy_meter
 import scraper_api_engine
 import page_parser as pp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
-from proxy_pool import Proxy, ProxyPool, ProxyParseError, load_proxies, selenium_block_media, should_block_media
-from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
+from proxy_pool import Proxy, selenium_block_media, should_block_media
+from fingerprint_client import align_user_agent, choose_user_agent, refuse_if_cdp
 from scraper_api_client import TwoCaptchaClient
 
 ENGINE_NAME = "selenium"
@@ -86,7 +87,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="instagram.com public profile and post scraper (logged out) — Selenium engine",
         epilog="Credentials belong in .env / INSTAGRAM_PROXY / TWOCAPTCHA_KEY — never on this command line.",
     )
-    p.add_argument("--url", default=None, help="One profile, post or Reel URL, @username or bare username (or set INSTAGRAM_URL) — overrides --urls-file")
+    p.add_argument("--url", default=None, help="One profile, post or Reel URL, @username or bare username (or set INSTAGRAM_URL); not together with --urls-file")
     p.add_argument("--urls-file", default=None)
     p.add_argument("--posts", type=int, default=0, metavar="N", help="Also fetch each profile's N most recent posts (0-12; a logged-out profile page embeds 12, pinned first)")
     p.add_argument("--max-results", type=_positive_int, default=100)
@@ -143,8 +144,6 @@ def _build_driver(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
     options.add_argument("--disable-dev-shm-usage")
     if _CHROME_BINARY:
         options.binary_location = _CHROME_BINARY
-    if user_agent:
-        options.add_argument(f"--user-agent={user_agent}")
 
     if cdp_endpoint:
         options.debugger_address = urlparse(cdp_endpoint).netloc.split("@")[-1]
@@ -153,12 +152,8 @@ def _build_driver(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
     options.add_experimental_option("prefs", {"intl.accept_languages": "en-US,en"})
 
     if proxy is not None:
-        if proxy.has_auth:
-            log.warning(
-                "Selenium's --proxy-server cannot authenticate — using %s:%s "
-                "with credentials STRIPPED, not silently dropped.",
-                proxy.host, proxy.port,
-            )
+        # A proxy with a login never gets here: page_flow.load_proxy_pool
+        # refuses it for this engine (exit 2).
         options.add_argument(f"--proxy-server={proxy.server_only()}")
         # Chrome's performance log carries the CDP Network events that
         # proxy_meter counts for --proxy-budget-mb.
@@ -170,7 +165,13 @@ def _build_driver(*, headless: bool, proxy: Optional[Proxy], cdp_endpoint: Optio
         service = Service()  # Selenium Manager: resolves/downloads over the network
     else:
         service = None
-    return webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+    if user_agent:
+        # Set over CDP after launch, so its Chrome version can be the one
+        # that actually started (fingerprint_client.align_user_agent).
+        aligned = align_user_agent(user_agent, (driver.capabilities or {}).get("browserVersion"))
+        driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": aligned})
+    return driver
 
 
 _STATUS_JS = (
@@ -285,21 +286,17 @@ def run(args: argparse.Namespace) -> int:
             "for the Scraping Browser API.", file=sys.stderr,
         )
         return EXIT_BAD_USAGE
+    args.out = args.out or _default_out(args.format)
+
+    # Selenium's --proxy-server cannot authenticate: a proxy with a login is
+    # refused here (exit 2), not stripped into a run where every page is a 407.
+    proxy_pool, stop = page_flow.load_proxy_pool(args, can_authenticate=False)
+    if stop is not None:
+        return stop
     if webdriver is None:
         print(f"Error: selenium is not installed ({_SELENIUM_IMPORT_ERROR}). "
               f"pip install -r requirements-selenium.txt", file=sys.stderr)
         return EXIT_CRASH
-    args.out = args.out or _default_out(args.format)
-
-    try:
-        proxies = load_proxies(args.proxy, args.proxy_file)
-    except ProxyParseError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_BAD_USAGE
-    proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
-    if args.cdp_endpoint and proxy_pool is not None:
-        log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
-        proxy_pool = None
     # Before any browser exists: a proxy that refuses its credential (407) or
     # has no traffic left (402) would refuse every request the browser makes.
     # Checked with the proxy as configured, credentials included: the
@@ -319,11 +316,9 @@ def run(args: argparse.Namespace) -> int:
         if client is None:
             log.warning("--fingerprint requested but no --twocaptcha-key/TWOCAPTCHA_KEY set — continuing without one.")
         else:
-            profile = fetch_fingerprint(client, tags=args.fp_tags, country=args.fp_country)
-            if profile:
-                user_agent = user_agent_from(profile)
-                if user_agent:
-                    log.info("Fingerprint applied: user agent %s", user_agent)
+            user_agent = choose_user_agent(client, tags=args.fp_tags, country=args.fp_country)
+            if user_agent:
+                log.info("Fingerprint applied (Chrome version set to the browser's): %s", user_agent)
 
     try:
         return asyncio.run(page_flow.run(_SeleniumEngine(args, user_agent=user_agent, client=client), args, urls=urls,
@@ -338,10 +333,11 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     args = build_arg_parser().parse_args()
     args = env_config.apply_env(args)
+    page_flow.STOP.install()
     try:
         return run(args)
     except KeyboardInterrupt:
-        return EXIT_CRASH
+        return page_flow.interrupted_exit(args)
 
 
 if __name__ == "__main__":

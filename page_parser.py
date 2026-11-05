@@ -50,8 +50,9 @@ What a logged-out visitor is actually served:
     `if_not_gated_logged_out` holds the full media object: `taken_at`,
     `like_count`, `comment_count`, `caption`, `image_versions2`,
     `video_versions` (Reels), `carousel_media` (carousels),
-    `coauthor_producers`, `usertags`, `user` (and a `location` that was
-    null on all 36 posts read live, so it is not a column). The same page also
+    `coauthor_producers`, `usertags`, `user` and `location` (null on most
+    posts — 36 of 36 on 2026-10-04 — but present with `pk`, `name`, `lat`
+    and `lng` on a geotagged one, e.g. /p/De5mVMikVB-/, 2026-10-25). The same page also
     embeds its owner's timeline, so the media object is matched by the
     URL's own shortcode, never taken as "the first one found".
   - `web_profile_info` (`/api/v1/users/web_profile_info/`), the JSON
@@ -90,6 +91,11 @@ ROUTE_PROFILE = "comet.igweb.PolarisLoggedOutDesktopWWWProfileRoute"
 ROUTE_POST = "comet.igweb.PolarisLoggedOutDesktopWWWPostRoute"
 ROUTE_ERROR = "comet.igweb.PolarisErrorRoute"
 ROUTE_LOGIN = "comet.igweb.PolarisCAAIGLoginHomepageRoute"
+# A phone's user agent (e.g. an Android profile from --fingerprint) gets the
+# mobile layout, e.g. `comet.instagramwebloggedout.PolarisLoggedOutMobilePostRoute`
+# (seen 2026-10-26): a real Instagram page, but its media object has another
+# shape, so it is reported as the wrong layout, not read and not "not Instagram".
+_MOBILE_ROUTE_RE = re.compile(r"\.PolarisLoggedOutMobile\w*Route$")
 _ROUTE_RE = re.compile(r'"canonicalRouteName"\s*:\s*"([A-Za-z0-9_.]+)"')
 
 # No captcha or bot-challenge vendor was met on any logged-out capture:
@@ -121,11 +127,17 @@ _MENTION_RE = re.compile(r"(?<![\w.])@([A-Za-z0-9._]{1,30})")
 # --------------------------------------------------------------------------- #
 # URL helpers
 # --------------------------------------------------------------------------- #
+# Hosts an input URL may name; every one is read through www.instagram.com.
+# `m.` is the old mobile host and `instagr.am` the short-link domain — both
+# still found in copied lists.
+_INPUT_HOSTS = ("instagram.com", "www.instagram.com", "m.instagram.com", "instagr.am", "www.instagr.am")
+
+
 def _instagram_parts(url: str):
     try:
         parts = urlparse(url)
         ok = (parts.scheme in ("http", "https")
-              and parts.hostname in ("instagram.com", "www.instagram.com")
+              and parts.hostname in _INPUT_HOSTS
               and parts.username is None and parts.password is None
               and parts.port in (None, 80 if parts.scheme == "http" else 443))
     except ValueError:
@@ -162,9 +174,10 @@ def normalize_input(text: str) -> Optional[str]:
         return None
     if text.startswith("@"):
         text = text[1:]
-    if _USERNAME_RE.match(text) and text.lower() not in _RESERVED_SEGMENTS:
-        return profile_url(text)
-    if text.startswith(("instagram.com/", "www.instagram.com/")):
+    bare = text.rstrip("/")  # `nasa/`, as copied from an address bar
+    if bare and "/" not in bare and _USERNAME_RE.match(bare) and bare.lower() not in _RESERVED_SEGMENTS:
+        return profile_url(bare)
+    if text.lower().startswith(tuple(host + "/" for host in _INPUT_HOSTS)):
         text = "https://" + text
     kind, key = classify_url(text)
     if kind == "profile":
@@ -180,6 +193,20 @@ def profile_url(username: str) -> str:
 
 def post_url(shortcode: str) -> str:
     return f"{BASE_URL}/p/{shortcode}/"
+
+
+def fetch_url(url: str) -> str:
+    """The address actually opened for a canonical URL: `?hl=en` pins the
+    page language. Instagram writes the alt text in the visitor's language
+    — from Accept-Language, the OS locale (Chrome on macOS ignores
+    --lang), a remote browser profile's, or the Scraper API exit's country —
+    and `hl` outranks every one of them (measured 2026-11-05: a ru-RU
+    browser with `?hl=en` gets English, an en-US one with `?hl=fi` Finnish)."""
+    return url + ("&" if "?" in url else "?") + "hl=en"
+
+
+def is_mobile_route(route: Optional[str]) -> bool:
+    return bool(route) and bool(_MOBILE_ROUTE_RE.search(route))
 
 
 # --------------------------------------------------------------------------- #
@@ -241,6 +268,12 @@ def _as_int(value: Any) -> Optional[int]:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _as_bool(value: Any) -> Optional[bool]:
@@ -437,6 +470,7 @@ def parse_post(html: str, *, shortcode: str) -> Optional[Product]:
         if url:
             media_urls.append(url)
     product_type = _text(media.get("product_type"))
+    location = media.get("location") if isinstance(media.get("location"), dict) else {}
     return Product(
         sku=make_sku("post", shortcode),
         source=SOURCE,
@@ -470,6 +504,10 @@ def parse_post(html: str, *, shortcode: str) -> Optional[Product]:
         video_url=_video_url(media),
         width=_as_int(media.get("original_width")),
         height=_as_int(media.get("original_height")),
+        location_name=_text(location.get("name")),
+        location_id=_text(str(location["pk"])) if location.get("pk") is not None else None,
+        location_lat=_as_float(location.get("lat")),
+        location_lng=_as_float(location.get("lng")),
     )
 
 

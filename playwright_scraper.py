@@ -45,10 +45,9 @@ import proxy_meter
 import scraper_api_engine
 import scraper_api_client
 import page_parser as pp
-from fingerprint_client import fetch_fingerprint, refuse_if_cdp, user_agent_from
+from fingerprint_client import align_user_agent, choose_user_agent, refuse_if_cdp
 from output_writer import EXIT_BAD_USAGE, EXIT_CRASH
-from proxy_pool import (BLOCKED_RESOURCE_TYPES, Proxy, ProxyPool, ProxyParseError, load_proxies, redact_credentials,
-                        should_block_media)
+from proxy_pool import BLOCKED_RESOURCE_TYPES, Proxy, redact_credentials, should_block_media
 from scraper_api_client import TwoCaptchaClient
 
 ENGINE_NAME = "playwright"
@@ -74,7 +73,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="instagram.com public profile and post scraper (logged out) — Playwright engine",
         epilog="Credentials belong in .env / INSTAGRAM_PROXY / TWOCAPTCHA_KEY — never on this command line.",
     )
-    p.add_argument("--url", default=None, help="One profile, post or Reel URL, @username or bare username (or set INSTAGRAM_URL) — overrides --urls-file")
+    p.add_argument("--url", default=None, help="One profile, post or Reel URL, @username or bare username (or set INSTAGRAM_URL); not together with --urls-file")
     p.add_argument("--urls-file", default=None, help="Path to a file with one profile/post URL or username per line (# comments allowed)")
     p.add_argument("--posts", type=int, default=0, metavar="N", help="Also fetch each profile's N most recent posts (0-12; a logged-out profile page embeds 12, pinned first)")
     p.add_argument("--max-results", type=_positive_int, default=100, help="Cap on how many URLs (profiles and posts together) are fetched this run")
@@ -257,18 +256,16 @@ async def run(args: argparse.Namespace) -> int:
     if args.scraper_api:
         args.out = args.out or _default_out(args.format)
         return await scraper_api_engine.run(args, urls=urls, started_at=started_at)
+    args.out = args.out or _default_out(args.format)
+
+    # Usage problems first: they need no browser to be found.
+    proxy_pool, stop = page_flow.load_proxy_pool(args)
+    if stop is not None:
+        return stop
     if async_playwright is None:
         print(f"Error: playwright is not installed ({_PLAYWRIGHT_IMPORT_ERROR}). "
               f"pip install -r requirements-playwright.txt && playwright install chromium", file=sys.stderr)
         return EXIT_CRASH
-    args.out = args.out or _default_out(args.format)
-
-    try:
-        proxies = load_proxies(args.proxy, args.proxy_file)
-    except ProxyParseError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_BAD_USAGE
-    proxy_pool = ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries) if proxies else None
     # Before any browser exists: a proxy that refuses its credential (407) or
     # has no traffic left (402) would refuse every request the browser makes.
     page_flow.start_proxy_meter(args, proxy_pool)
@@ -284,18 +281,11 @@ async def run(args: argparse.Namespace) -> int:
         if client is None:
             log.warning("--fingerprint requested but no --twocaptcha-key/TWOCAPTCHA_KEY set — continuing without one.")
         else:
-            profile = fetch_fingerprint(client, tags=args.fp_tags, country=args.fp_country)
-            if profile:
-                user_agent = user_agent_from(profile)
-                if user_agent:
-                    log.info("Fingerprint applied: user agent %s", user_agent)
+            user_agent = choose_user_agent(client, tags=args.fp_tags, country=args.fp_country)
 
     try:
         async with async_playwright() as pw:
             if args.cdp_endpoint:
-                if args.proxy or args.proxy_file:
-                    log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
-                    proxy_pool = None
                 try:
                     browser = await _connect_over_cdp(pw, args.cdp_endpoint)
                 except RuntimeError as exc:
@@ -305,6 +295,9 @@ async def run(args: argparse.Namespace) -> int:
                                             pages_completed=0, failed_pages=[])
             else:
                 browser = await pw.chromium.launch(headless=args.headless)
+                user_agent = align_user_agent(user_agent, browser.version)
+                if user_agent:
+                    log.info("Fingerprint applied: user agent %s", user_agent)
             engine = _PlaywrightEngine(browser, args, autosolve=bool(args.cdp_endpoint) and args.solve_captcha != "off",
                                        user_agent=user_agent, client=client)
             try:
@@ -322,10 +315,11 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
     args = env_config.apply_env(args)
+    page_flow.STOP.install()
     try:
         return asyncio.run(run(args))
     except KeyboardInterrupt:
-        return EXIT_CRASH
+        return page_flow.interrupted_exit(args)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ browser or an HTTP client, so the proxy's own bill is a few per cent higher.
 WebSocket frames, and the browser's own background requests that are not
 part of any page, are not counted either. 1 MB here is 1,000,000 bytes.
 
-The budget (`--proxy-budget-mb`, default 10, 0 = unlimited): once the
+The budget (`--proxy-budget-mb`, default 50, 0 = unlimited): once the
 running total goes past it, the engine stops fetching new pages, any request
 the browser still tries is aborted, the rows already gathered are kept, and
 the run ends with stop_reason `proxy_budget_exceeded` — exit 6 when it has
@@ -44,7 +44,10 @@ from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
 
 MB = 1_000_000
-DEFAULT_BUDGET_MB = 10.0
+# Through a proxy, with media blocked, one Instagram page cost 0.8-2.5 MB
+# (measured 2026-10-25 and 2026-11-02), so the README's own example
+# (`--posts 12`, 13 pages) needs up to ~33 MB.
+DEFAULT_BUDGET_MB = 50.0
 STOP_REASON = "proxy_budget_exceeded"
 SIDECAR_KEYS = ("proxy_bytes", "proxy_budget_bytes", "proxy_budget_exceeded")
 

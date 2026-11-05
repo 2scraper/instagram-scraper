@@ -35,6 +35,18 @@ from typing import Dict, List
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 
+# Exit codes: 0 = no change (or no --fail-on-change), 1 = a monitored change
+# with --fail-on-change, 2 = the comparison itself could not be made (a
+# missing file or sidecar, a partial run, another selection...). A cron job
+# or CI step must be able to tell "something changed" from "the check broke".
+EXIT_CHANGED = 1
+EXIT_ERROR = 2
+
+
+class DiffError(ValueError):
+    """The two runs cannot be compared; the message says why."""
+
+
 MONITOR_FIELDS = ("follower_count", "following_count", "like_count", "comment_count",
                   "caption", "biography", "full_name", "is_verified", "is_private", "likes_hidden")
 NUMERIC_FIELDS = {"follower_count", "following_count", "like_count", "comment_count"}
@@ -55,22 +67,42 @@ def field_value(row, field):
     return value
 
 
+def _blank_to_none(value):
+    """A CSV cell is a string: an empty one is the JSON output's null."""
+    return None if value == "" else value
+
+
+def _price(row):
+    value = _blank_to_none(row.get("price"))
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
+
+
 def _load_meta(run_path: str) -> dict:
     meta_path = Path(f"{run_path}.meta.json")
     if not meta_path.exists():
-        raise SystemExit(f"error: no sidecar found at {meta_path} — was this run produced by finish_run()?")
-    return json.loads(meta_path.read_text(encoding="utf-8"))
+        raise DiffError(f"error: no sidecar found at {meta_path} — was this run produced by finish_run()?")
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise DiffError(f"error: could not read {meta_path}: {exc}") from None
 
 
 def _load_rows(run_path: str) -> List[dict]:
     path = Path(run_path)
+    if not path.is_file():
+        raise DiffError(f"error: no run file at {path}")
     if path.suffix == ".json":
         return json.loads(path.read_text(encoding="utf-8"))
     if path.suffix == ".csv":
         import csv
         with path.open(newline="", encoding="utf-8") as f:
             return list(csv.DictReader(f))
-    raise SystemExit(f"error: unsupported run file extension: {path.suffix}")
+    raise DiffError(f"error: unsupported run file extension: {path.suffix}")
 
 
 def _index_by_sku(rows: List[dict]) -> Dict[str, dict]:
@@ -96,7 +128,7 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False, f
     old_meta, new_meta = _load_meta(old_path), _load_meta(new_path)
     for label, meta in (("old", old_meta), ("new", new_meta)):
         if meta.get("status") != "complete":
-            raise SystemExit(
+            raise DiffError(
                 f"error: refusing to diff — {label} run status is "
                 f"{meta.get('status')!r}, not 'complete'. A partial run's "
                 f"un-fetched pages would read as delisted products."
@@ -104,21 +136,21 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False, f
     for label, path, meta in (("old", old_path, old_meta), ("new", new_path, new_meta)):
         expected = meta.get("output_sha256")
         if expected and hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected:
-            raise SystemExit(f"error: {label} run's sidecar does not describe {path} (output_sha256 mismatch).")
+            raise DiffError(f"error: {label} run's sidecar does not describe {path} (output_sha256 mismatch).")
     if not allow_different_scope and normalize_scope(old_meta.get("url", "")) != normalize_scope(new_meta.get("url", "")):
-        raise SystemExit(
+        raise DiffError(
             f"error: refusing to diff runs of different selections: {old_meta.get('url')!r} vs "
             f"{new_meta.get('url')!r}. Pass --allow-different-scope to compare them anyway."
         )
     if not allow_different_scope and (old_meta.get("sort") or None) != (new_meta.get("sort") or None):
-        raise SystemExit(
+        raise DiffError(
             f"error: refusing to diff runs with different --sort ({old_meta.get('sort')!r} vs "
             f"{new_meta.get('sort')!r}) — a capped top-N under another ordering is another selection."
         )
     if not allow_different_scope and old_meta.get("selection") != new_meta.get("selection"):
-        raise SystemExit("error: refusing to diff different input selections (or legacy metadata without selection).")
+        raise DiffError("error: refusing to diff different input selections (or legacy metadata without selection).")
     if old_meta.get("incremental") or new_meta.get("incremental"):
-        raise SystemExit("error: incremental outputs contain only new posts; compare full snapshots instead.")
+        raise DiffError("error: incremental outputs contain only new posts; compare full snapshots instead.")
     capped = bool(old_meta.get("capped") or new_meta.get("capped")
                   or (old_meta.get("selection") or {}).get("posts")
                   or (new_meta.get("selection") or {}).get("posts"))
@@ -147,7 +179,7 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False, f
                     changes[name]["delta"] = after - before
         if changes:
             field_changes.append({"sku": sku, "fields": changes})
-        old_price, new_price = o.get("price"), n.get("price")
+        old_price, new_price = _price(o), _price(n)
         if (o.get("currency") or None) != (n.get("currency") or None):
             currency_changed.append({
                 "sku": sku, "old_price": old_price, "old_currency": o.get("currency"),
@@ -157,7 +189,7 @@ def diff(old_path: str, new_path: str, *, allow_different_scope: bool = False, f
         if old_price == new_price:
             continue
         entry = {"sku": sku, "old_price": old_price, "new_price": new_price, "title": n.get("title")}
-        if o.get("price_source") != n.get("price_source"):
+        if _blank_to_none(o.get("price_source")) != _blank_to_none(n.get("price_source")):
             entry["old_price_source"] = o.get("price_source")
             entry["new_price_source"] = n.get("price_source")
             source_changed.append(entry)
@@ -176,7 +208,7 @@ def main() -> int:
     p.add_argument("old_run")
     p.add_argument("new_run")
     p.add_argument("--fail-on-change", action="store_true",
-                    help="Exit 1 when monitored fields or selection membership change")
+                    help="Exit 1 when monitored fields or selection membership change (an error is always exit 2)")
     p.add_argument("--json", action="store_true", help="Print the diff as JSON instead of a summary")
     p.add_argument("--allow-different-scope", action="store_true",
                     help="Compare runs whose sidecar URLs (market, query, category) differ")
@@ -186,7 +218,12 @@ def main() -> int:
     if fields and any(name not in MONITOR_FIELDS for name in fields):
         p.error("Unknown --fields value; choose from " + ",".join(MONITOR_FIELDS))
 
-    result = diff(args.old_run, args.new_run, allow_different_scope=args.allow_different_scope, fields=fields)
+    try:
+        result = diff(args.old_run, args.new_run, allow_different_scope=args.allow_different_scope, fields=fields)
+    except (DiffError, OSError, ValueError) as exc:
+        message = str(exc)
+        print(message if message.startswith("error:") else f"error: {message}", file=sys.stderr)
+        return EXIT_ERROR
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -199,12 +236,15 @@ def main() -> int:
         print(f"  monitored rows changed: {len(result['field_changes'])}")
         for entry in result["field_changes"]:
             print(f"    {entry['sku']}: " + json.dumps(entry["fields"], ensure_ascii=False))
-        print(f"  price changed:  {len(result['changed'])}")
-        print(f"  source_changed: {len(result['source_changed'])} (ignored by --fail-on-change)")
-        print(f"  currency_changed: {len(result['currency_changed'])} (ignored by --fail-on-change: a market change, not a price change)")
+        # Instagram rows carry no price; the family's price lines are printed
+        # only if a run ever has one, not as a permanent "0".
+        if result["changed"] or result["source_changed"] or result["currency_changed"]:
+            print(f"  price changed:  {len(result['changed'])}")
+            print(f"  source_changed: {len(result['source_changed'])} (ignored by --fail-on-change)")
+            print(f"  currency_changed: {len(result['currency_changed'])} (ignored by --fail-on-change: a market change, not a price change)")
 
     if args.fail_on_change and any(result[key] for key in ("changed", "field_changes", "added", "removed", "left_selection")):
-        return 1
+        return EXIT_CHANGED
     return 0
 
 

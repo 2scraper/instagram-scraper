@@ -868,7 +868,7 @@ def _():
         try:
             diff_runs.diff(old_out, new_out)
             raise AssertionError("expected a refusal — old run is 'partial', not 'complete'")
-        except SystemExit:
+        except diff_runs.DiffError:
             pass
 
 
@@ -907,7 +907,7 @@ def _():
         try:
             diff_runs.diff(a, b)
             raise AssertionError("different selections must be refused")
-        except SystemExit as exc:
+        except diff_runs.DiffError as exc:
             assert "different selections" in str(exc)
         r = diff_runs.diff(a, b, allow_different_scope=True)
         assert not r["changed"] and len(r["currency_changed"]) == 1
@@ -930,7 +930,7 @@ def _():
         try:
             diff_runs.diff(f, g)
             raise AssertionError("a sidecar whose hash does not match must be refused")
-        except SystemExit as exc:
+        except diff_runs.DiffError as exc:
             assert "output_sha256" in str(exc)
 
 @check("the credential scanner FINDS a planted key in every shape seen in the family (JSON-quoted, JSON-escaped, 32-hex next to a key word) and ignores placeholders, type hints and Python-name mappings — a scanner that cannot fail is not one")
@@ -1016,7 +1016,7 @@ def _():
         try:
             diff_runs.diff(a, b)
             raise AssertionError("different --sort must be refused")
-        except SystemExit as exc:
+        except diff_runs.DiffError as exc:
             assert "--sort" in str(exc)
 
 
@@ -1103,6 +1103,7 @@ class _FakeEngine:
 
         class _S(_FakeSession):
             async def goto(self, url):
+                url = url.removesuffix("?hl=en")  # page_flow pins the page language (pp.fetch_url)
                 engine.asked.append(url)
                 self.script = dict(engine.by_url.get(url, engine.by_url.get("*", {})))
                 return await _FakeSession.goto(self, url)
@@ -1224,6 +1225,7 @@ class _FakeScrapeClient:
         self.answers, self.calls = list(answers), []
 
     def scrape_url(self, url, *, data_format, timeout, cdp_url):
+        url = url.removesuffix("?hl=en")  # page_flow pins the page language (pp.fetch_url)
         self.calls.append((url, cdp_url))
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         if isinstance(answer, Exception):
@@ -1312,7 +1314,8 @@ def _():
     for empty in ({}, {"userAgent": {}}, {"userAgent": {"userAgent": ""}}, None):
         assert fc.user_agent_from(empty) is None, empty
     for path in ("playwright_scraper.py", "puppeteer_scraper.py", "selenium_scraper.py"):
-        assert 'log.info("Fingerprint applied: user agent %s", user_agent)' in (ROOT / path).read_text(encoding="utf-8"), path
+        text = (ROOT / path).read_text(encoding="utf-8")
+        assert "choose_user_agent(client" in text and 'log.info("Fingerprint applied' in text, path
 
 
 def _canary_check_snippets():
@@ -1394,6 +1397,12 @@ def _stub_proxy_url(port):
     return "http://" + "%s:%s" % (_STUB_LOGIN, _STUB_SECRET) + "@127.0.0.1:%d" % port
 
 
+def _engine_proxy_url(mod, port):
+    """Selenium refuses a proxy with a login before the pre-check (it
+    cannot authenticate one), so it is checked with an IP-allowlisted one."""
+    return "http://127.0.0.1:%d" % port if mod is selenium_scraper else _stub_proxy_url(port)
+
+
 def _patched_browser_start(mod):
     """Patch the engine's browser launch to record the call and fail. The
     driver need not be installed: the pre-check runs before it is used."""
@@ -1443,7 +1452,7 @@ def _():
                         for p in patches:
                             stack.enter_context(p)
                         rc, text = _run_engine_quietly(mod, ["--url", "natgeo", "--out", str(out),
-                                                             "--proxy", _stub_proxy_url(port)])
+                                                             "--proxy", _engine_proxy_url(mod, port)])
                 finally:
                     server.shutdown()
                     server.server_close()
@@ -1453,6 +1462,8 @@ def _():
                 assert hits == [("CONNECT", "www.instagram.com:443")], (tag, hits)
                 assert words in text and "INSTAGRAM_PROXY" in text, (tag, text[-300:])
                 assert _STUB_SECRET not in text, f"{tag}: the credential was printed"
+                if mod is selenium_scraper:
+                    assert "INSTAGRAM_PROXY" in text, tag
                 attempt = Path(f"{out}{output_writer.ATTEMPT_META_SUFFIX}")
                 meta = json.loads(attempt.read_text())
                 assert (meta["status"], meta["stop_reason"], meta["data_updated"], meta["engine"]) == \
@@ -1475,7 +1486,7 @@ def _():
                     for p in patches:
                         stack.enter_context(p)
                     _run_engine_quietly(mod, ["--url", "natgeo", "--out", str(Path(td) / "o.json"),
-                                              "--proxy", _stub_proxy_url(port), "--retries", "0"])
+                                              "--proxy", _engine_proxy_url(mod, port), "--retries", "0"])
             finally:
                 server.shutdown()
                 server.server_close()
@@ -1771,7 +1782,7 @@ def _():
     assert "Proxy traffic: 0.0 MB of 10 MB budget" in err
 
 
-@check("proxy budget: finish_run puts the budget stop above every other outcome — a run that also met a block or a failed page still ends 6 with rows and 5 without, stop_reason proxy_budget_exceeded")
+@check("proxy budget: finish_run puts the budget stop above every other outcome — a run that also met a block or a failed page still ends 6 with rows and 5 without, stop_reason proxy_budget_exceeded; crossed on the last page with every page read, the run is complete")
 def _():
     import dataclasses
     rows = [output_writer.Product(**{f.name: None for f in dataclasses.fields(output_writer.Product)
@@ -1790,18 +1801,30 @@ def _():
                 meta = json.loads(path.read_text())
             assert rc == want and meta["stop_reason"] == "proxy_budget_exceeded", (blocked, failed, rc, meta)
             assert meta["proxy_budget_exceeded"] is True and meta["proxy_bytes"] == 5000, meta
+        # Crossed while the LAST page loaded, with every page read: nothing was
+        # left unread, so the run is complete (QA 2026-10-25: a 13/13 run was
+        # marked partial and diff_runs then refused it).
+        proxy_meter.start(0.001, active=True)
+        proxy_meter.current().add(5000)
+        with tempfile.TemporaryDirectory() as td:
+            out = str(Path(td) / "o.json")
+            rc = output_writer.finish_run(products=rows, out_path=out, fmt="json", engine="t", url="u",
+                                          pages_requested=2, pages_completed=2, failed_pages=[], blocked=False,
+                                          remote_api_error=False, allow_empty=False, started_at=0.0)
+            meta = json.loads(Path(out + ".meta.json").read_text())
+        assert (rc, meta["status"], meta["proxy_budget_exceeded"]) == (0, "complete", True), (rc, meta)
     finally:
         proxy_meter.start(None, active=False)
 
 
-@check("proxy budget: --proxy-budget-mb is on every engine (default 10, 0 = unlimited, a negative or non-number value is a usage error naming the flag); the meter is active only for a LOCAL proxy — never over --cdp-endpoint, --scraper-api or with no proxy")
+@check("proxy budget: --proxy-budget-mb is on every engine (default 50, 0 = unlimited, a negative or non-number value is a usage error naming the flag); the meter is active only for a LOCAL proxy — never over --cdp-endpoint, --scraper-api or with no proxy")
 def _():
     import argparse
     import contextlib
     import io
     for mod in (playwright_scraper, selenium_scraper, puppeteer_scraper):
         parser = mod.build_arg_parser()
-        assert parser.parse_args(["--url", "x"]).proxy_budget_mb == 10, mod.__name__
+        assert parser.parse_args(["--url", "x"]).proxy_budget_mb == 50, mod.__name__
         assert "--proxy-budget-mb" in parser.format_help(), mod.__name__
         for bad in ("-1", "lots"):
             err = io.StringIO()

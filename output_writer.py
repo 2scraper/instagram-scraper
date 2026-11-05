@@ -94,15 +94,14 @@ class Product:
       `caption`, `hashtags_json` / `mentions_json` (from the caption),
       `alt_text` (Instagram's own accessibility text), `coauthors_json`, `tagged_users_json`, `media_count` and
       `media_urls_json` (each slide of a carousel; video URLs for video),
-      `video_url`, `width` / `height` (the original's).
+      `video_url`, `width` / `height` (the original's), and the geotag:
+      `location_name`, `location_id`, `location_lat`, `location_lng` (`None`
+      on a post without one — most posts).
 
     Not here, measured 2026-10-04: a post count (`all_media_count` is null
     for a logged-out visitor, and `og:description` rounds it to "32K"),
-    a Reel's play count (not in the logged-out media object at all), a
-    location (`location` was null on 36 of 36 posts, including 12 from a
-    travel account — a column null on every row must not
-    exist; add it back with a capture that has one), and comments (see
-    page_parser.py).
+    a Reel's play count (not in the logged-out media object at all), and
+    comments (see page_parser.py).
     """
 
     # --- family-common ---
@@ -149,6 +148,10 @@ class Product:
     video_url: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    location_name: Optional[str] = None
+    location_id: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
 
 
 PRODUCT_FIELD_NAMES: List[str] = [f.name for f in fields(Product)]
@@ -429,7 +432,12 @@ def finish_run(
     caller explicitly passed --allow-empty."""
     failed_pages = failed_pages or []
     meter = proxy_meter.current()
-    if meter.exceeded:
+    # The budget only makes a run incomplete when it LEFT something unread:
+    # crossed while the last page loaded, with every page read, the run is
+    # complete (the sidecar still says proxy_budget_exceeded: true).
+    budget_stopped = meter.exceeded and bool(failed_pages or blocked or remote_api_error or rejected_rows
+                                             or incomplete_reason or pages_completed < pages_requested)
+    if budget_stopped:
         incomplete_reason = proxy_meter.STOP_REASON
     partial = bool(failed_pages) or bool(incomplete_reason)
     zero_products = len(products) == 0
@@ -468,7 +476,7 @@ def finish_run(
     else:
         status, exit_code = "complete", EXIT_OK
         stop_reason = status
-    if meter.exceeded:
+    if budget_stopped:
         # The run stopped itself at --proxy-budget-mb: rows kept -> 6, none -> 5,
         # whatever else the pages it did fetch said.
         status, exit_code = ("remote_api_error", EXIT_REMOTE_API_ERROR) if zero_products else ("partial", EXIT_PARTIAL)
