@@ -34,6 +34,8 @@ POST = (FIX / 'instagram_post_image_live_20261004.html').read_text()
 LOGIN = (FIX / 'instagram_login_wall_live_20261004.html').read_text()
 CODE = 'DeAZ0uAgNuA'
 ENGINES = (playwright, puppeteer, selenium)
+# The Docker image runs this suite without the docs (README, .dockerignore).
+HAS_DOCS = (ROOT / 'README.md').is_file() and (ROOT / '.dockerignore').is_file()
 
 
 def creds_url(scheme, login, password, host):
@@ -153,7 +155,8 @@ class QaFixes(unittest.TestCase):
             self.assertEqual(puppeteer._find_executable(), '/x/chrome')
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(puppeteer.sys, 'platform', 'linux'):
             self.assertIsNone(puppeteer._find_executable())
-        self.assertIn('PYPPETEER_EXECUTABLE_PATH', (ROOT / 'README.md').read_text())
+        if HAS_DOCS:
+            self.assertIn('PYPPETEER_EXECUTABLE_PATH', (ROOT / 'README.md').read_text())
 
     # 3 -------------------------------------------------------------------
     def test_03_unwritable_out_is_refused_before_any_fetch(self):
@@ -286,6 +289,7 @@ class QaFixes(unittest.TestCase):
             self.assertIsNone(parser.normalize_input(text), text)
 
     # 13, 14 --------------------------------------------------------------
+    @unittest.skipUnless(HAS_DOCS, 'docs are not copied into the Docker image')
     def test_13_14_docs_and_docker_context(self):
         readme = (ROOT / 'README.md').read_text()
         for needle in ('--allow-different-scope', '--twocaptcha-key', '--captcha-api'):
