@@ -127,7 +127,7 @@ def load_proxies(proxy: Optional[str], proxy_file: Optional[str]) -> List[Proxy]
     if proxy:
         out.append(parse_proxy_line(proxy))
     if proxy_file:
-        for line in Path(proxy_file).read_text(encoding="utf-8").splitlines():
+        for line in Path(proxy_file).read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -169,6 +169,19 @@ class ProxyPool:
 
     def _live_proxies(self) -> List[Proxy]:
         return [p for p in self._proxies if not self._dead[id(p)]]
+
+    def live(self) -> List[Proxy]:
+        """The exits not dropped yet, in rotation order."""
+        return self._live_proxies()
+
+    def live_count(self) -> int:
+        return len(self._live_proxies())
+
+    def drop(self, proxy: Proxy) -> None:
+        """Take an exit out of rotation for the rest of the run (the
+        pre-check found its gateway refusing it)."""
+        if id(proxy) in self._dead:
+            self._dead[id(proxy)] = True
 
     def peek(self) -> Optional[Proxy]:
         """The exit `next()` would return, without moving the cursor."""

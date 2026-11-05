@@ -138,7 +138,7 @@ class Budget(unittest.TestCase):
     def test_flag_default_and_validation(self):
         parser = argparse.ArgumentParser()
         proxy_meter.add_budget_argument(parser)
-        self.assertEqual(parser.parse_args([]).proxy_budget_mb, 10)
+        self.assertEqual(parser.parse_args([]).proxy_budget_mb, 50)
         self.assertEqual(parser.parse_args(["--proxy-budget-mb", "0"]).proxy_budget_mb, 0)
         self.assertEqual(parser.parse_args(["--proxy-budget-mb", "2.5"]).proxy_budget_mb, 2.5)
         for bad in ("-1", "x", "nan", "inf"):
@@ -179,7 +179,7 @@ class Budget(unittest.TestCase):
         self.assertIs(proxy_meter.current(), meter)
         self.assertEqual(meter.budget_bytes, 3_000_000)
         proxy_meter.start(None, active=False)
-        self.assertEqual(proxy_meter.current().budget_bytes, 10_000_000)
+        self.assertEqual(proxy_meter.current().budget_bytes, 50_000_000)
 
 
 class HttpClient(unittest.TestCase):

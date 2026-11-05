@@ -73,7 +73,16 @@ class Outcome:
     timeline_status: Optional[str] = None
 
 
-def decide(*, url: str, http_status: Optional[int], html: str) -> Outcome:
+def _block_hint(scraper_api: bool) -> str:
+    """What to do about a block. Through --scraper-api the exit is the
+    Scraper API's (a --proxy-file is ignored there), so the advice differs."""
+    if scraper_api:
+        return ("The Scraper API's own pool often gets this for profiles — use a browser engine with a proxy, "
+                "or set INSTAGRAM_CDP_ENDPOINT to route --scraper-api through a Scraping Browser profile.")
+    return "Slow down (--delay-between-pages) or use another exit (--proxy-file)."
+
+
+def decide(*, url: str, http_status: Optional[int], html: str, scraper_api: bool = False) -> Outcome:
     route = pp.page_route(html or "")
     if route == pp.ROUTE_ERROR:
         return Outcome(None, False, True, "none",
@@ -81,7 +90,12 @@ def decide(*, url: str, http_status: Optional[int], html: str) -> Outcome:
     if route == pp.ROUTE_LOGIN:
         return Outcome(None, True, False, "none",
                        [f"{url}: Instagram served its login page instead — this exit is throttled or distrusted (blocked, not empty). "
-                        "Slow down (--delay-between-pages) or use another exit (--proxy-file)."])
+                        + _block_hint(scraper_api)])
+    if pp.is_mobile_route(route):
+        return Outcome(None, False, False, "none",
+                       [f"{url}: Instagram served its MOBILE layout ({route.rsplit('.', 1)[-1]}) — this scraper reads the "
+                        "desktop page. The user agent is a phone's: drop it, or use --fp-tags Windows with --fingerprint."],
+                       failure="fetch_error")
     if is_challenge(html):
         return Outcome(None, True, False, "none", [f"{url}: served a bot challenge — blocked."])
 
@@ -99,7 +113,7 @@ def decide(*, url: str, http_status: Optional[int], html: str) -> Outcome:
     if route in (pp.ROUTE_PROFILE, pp.ROUTE_POST) and not pp.has_embedded_data(html):
         return Outcome(None, True, False, "none",
                        [f"{url}: Instagram served the page without its data — this exit is rate-limited "
-                        "(blocked, not empty). Slow down (--delay-between-pages) or rotate exits (--proxy-file)."],
+                        "(blocked, not empty). " + _block_hint(scraper_api)],
                        rate_limited=True)
     if route in (pp.ROUTE_PROFILE, pp.ROUTE_POST):
         return Outcome(None, False, False, "none",
@@ -195,18 +209,25 @@ class SolveBudget:
 
 
 def resolve_urls(args) -> tuple:
-    """(urls, skipped). `--url` wins over `--urls-file`. Each input is a
-    profile URL, a post or Reel URL, `@username` or a bare username; it is
-    normalised to one canonical URL, and anything else is logged and
-    skipped, never fetched. Duplicates are fetched once."""
+    """(urls, skipped). `--url` and `--urls-file` are exclusive (a configured
+    INSTAGRAM_URL never competes with a typed --urls-file: env_config skips
+    it). Each input is a profile URL, a post or Reel URL, `@username` or a
+    bare username; it is normalised to one canonical URL, and anything else
+    is logged and skipped, never fetched. Duplicates are fetched once."""
+    if args.url and args.urls_file:
+        raise ValueError("use one of --url / --urls-file, not both")
     if args.url:
         candidates = [args.url]
     elif args.urls_file:
         try:
-            lines = _Path(args.urls_file).read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
+            # utf-8-sig: a list saved by Notepad or exported from Excel starts
+            # with a BOM, which would otherwise glue itself to the first line.
+            lines = _Path(args.urls_file).read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
             raise ValueError(f"could not read --urls-file {args.urls_file!r}: {exc}")
         candidates = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+        if not candidates:
+            raise ValueError(f"--urls-file {args.urls_file!r} has no inputs (every line is blank or a # comment)")
     else:
         return [], 0
     urls, skipped = [], 0
@@ -260,27 +281,58 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
         return Outcome(None, False, False, "none", failure="fetch_error")
     try:
         last_error, status = None, None
+        # `?hl=en`: Instagram localises the alt text to the visitor's language
+        # (Accept-Language, the OS locale, a remote profile's, or the Scraper
+        # API exit's country), and the parameter outranks all of them —
+        # measured 2026-11-05. The canonical `url` stays the row's identity.
+        target = pp.fetch_url(url)
         for attempt in range(args.retries + 1):
             if _meter.exceeded():
                 last_error = _meter.STOP_REASON
                 break
+            if STOP.requested:
+                last_error = INTERRUPTED
+                break
             try:
-                status = await session.goto(url)
+                status = await session.goto(target)
                 last_error = None
                 break
             except Exception as exc:  # noqa: BLE001 — every remote call must be bounded and reported
                 last_error = _redact(str(exc)).splitlines()[0] if str(exc) else type(exc).__name__
-                if proxy_pool is not None and proxy is not None and _is_proxy_dead_error(last_error):
+                rotate = proxy_pool is not None and proxy is not None and proxy_pool.live_count() > 1
+                if proxy_pool is not None and proxy is not None and (_is_proxy_dead_error(last_error) or rotate):
+                    # With other exits left, a failed navigation counts against
+                    # THIS exit and the retry goes through the next one: a dead
+                    # or refusing exit (a 407 shows up as a timeout in Chromium)
+                    # would fail every retry the same way.
                     proxy_pool.report_failure(proxy, dead=True)
-                    _log.warning("Proxy reported dead: %s", last_error)
+                    _log.warning("Navigation attempt %d/%d for %s via %s failed: %s", attempt + 1, args.retries + 1,
+                                 url, proxy.masked(), last_error)
                 else:
                     _log.warning("Navigation attempt %d/%d for %s failed: %s", attempt + 1, args.retries + 1, url, last_error)
                 if getattr(engine, "fatal", None):
                     break  # a refused key or an empty balance: every retry would fail the same way
                 if attempt < args.retries:
+                    if rotate:
+                        next_proxy = proxy_pool.next()
+                        if next_proxy is None:
+                            last_error = "proxy_pool_exhausted"
+                            break
+                        await _close_session(session)
+                        session = None
+                        proxy = next_proxy
+                        _log.info("Retrying %s through the next exit (%s)", url, proxy.masked())
+                        try:
+                            session = await engine.open(proxy)
+                        except Exception as open_exc:  # noqa: BLE001
+                            _log.error("Browser connection failed — treating this URL as failed, not a crash: %s",
+                                       _redact(str(open_exc)))
+                            return Outcome(None, False, False, "none", failure="fetch_error")
                     await engine.sleep(args.retry_delay)
         if last_error == _meter.STOP_REASON:
             return Outcome(None, False, False, "none", failure=_meter.STOP_REASON)
+        if last_error in (INTERRUPTED, "proxy_pool_exhausted"):
+            return Outcome(None, False, False, "none", failure=last_error)
         if last_error is not None:
             _log.error("%s permanently failed to load: %s", url, last_error)
             return Outcome(None, False, False, "none",
@@ -303,7 +355,7 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
                 await session.wait(engine.readiness_s)
                 html = await session.content()
 
-        outcome = decide(url=url, http_status=status, html=html)
+        outcome = decide(url=url, http_status=status, html=html, scraper_api=engine.name == "scraper_api")
         for message in outcome.warnings:
             _log.warning("%s", message)
         if proxy_pool is not None and proxy is not None:
@@ -314,7 +366,11 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
             else:
                 proxy_pool.report_success(proxy)
         if args.dump_html:
-            _Path(_dump_path(args.out, index)).write_text(html, encoding="utf-8")
+            try:
+                _Path(_dump_path(args.out, index)).write_text(html, encoding="utf-8")
+            except OSError as exc:
+                # A debugging aid: failing to save it says nothing about the page.
+                _log.warning("Could not save --dump-html for %s: %s", url, exc)
         if getattr(engine, "last_remote_error", False) and outcome.product is None:
             outcome.failure = "remote_api_error"
         return outcome
@@ -326,6 +382,8 @@ async def fetch_item(engine: Engine, args, url: str, index: int, proxy_pool, cli
 
 
 async def _close_session(session):
+    if session is None:
+        return
     try:
         await session.close()
     except Exception as exc:
@@ -345,7 +403,10 @@ def _already_seen(args, url: str) -> bool:
 async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, started_at: float) -> int:
     """Fetch every URL in input order. A profile's `--posts N` shortcodes
     are queued right after it, so the output keeps each profile next to its
-    posts. `--max-results` caps the total number of URLs fetched."""
+    posts. `--max-results` caps the total number of URLs fetched; every
+    INPUT URL is always inside it (validate_common refuses a cap below the
+    input count), so the cap only ever trims posts queued by `--posts`, and
+    each trimmed post is listed in `excluded_urls` as `max_results`."""
     from dataclasses import asdict
 
     try:
@@ -359,8 +420,16 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
     queued = set(queue)
     run_state.save(args, urls, queue, records)
     consecutive_blocks = 0
+    interrupted = False
     i = 0
     while i < min(len(queue), args.max_results):
+        if STOP.requested:
+            interrupted = True
+            for pending in queue[i:args.max_results]:
+                if not records.get(pending, {}).get("done"):
+                    records[pending] = {"done": False, "failure": INTERRUPTED}
+            run_state.save(args, urls, queue, records)
+            break
         url = queue[i]
         i += 1
         if records.get(url, {}).get("done"):
@@ -370,11 +439,17 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
             run_state.save(args, urls, queue, records)
             continue
         outcome = await fetch_item(engine, args, url, i, proxy_pool, client)
+        trimmed = []
         if outcome.product is not None and outcome.product.category == "profile" and posts_per_profile:
             if outcome.timeline_status not in ("present", "private"):
                 outcome.failure = "parse_error"
             new = [pp.post_url(c) for c in outcome.post_codes[:posts_per_profile]]
             new = list(dict.fromkeys(u for u in new if u not in queued))
+            room = max(0, args.max_results - len(queue))
+            new, trimmed = new[:room], new[room:]
+            if trimmed:
+                _log.warning("--max-results %d reached: %d of %s's posts are not fetched (listed in excluded_urls "
+                             "as max_results). Raise --max-results to read them.", args.max_results, len(trimmed), url)
             queue[i:i] = new
             queued.update(new)
         excluded = None
@@ -391,6 +466,8 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
                   "product": asdict(outcome.product) if outcome.product else None,
                   "blocked": outcome.blocked, "rate_limited": outcome.rate_limited,
                   "failure": outcome.failure, "not_found": outcome.not_found, "excluded": excluded}
+        if trimmed:
+            record["trimmed_posts"] = trimmed  # kept in the checkpoint, so a --resume still reports them
         records[url] = record
         run_state.save(args, urls, queue, records)
         consecutive_blocks = consecutive_blocks + 1 if outcome.blocked else 0
@@ -427,12 +504,16 @@ async def run(engine: Engine, args, *, urls: List[str], proxy_pool, client, star
             not_found.append(url)
         if record.get("excluded"):
             exclusions.append({"url": url, "reason": record["excluded"]})
-    return finish(args, products=products, blocked=blocked, remote_api_error=remote_error,
+        exclusions.extend({"url": u, "reason": "max_results"} for u in record.get("trimmed_posts") or [])
+    code = finish(args, products=products, blocked=blocked, remote_api_error=remote_error,
                   engine_name=engine.name, urls=urls, fetched=queue[:args.max_results], started_at=started_at,
                   pages_completed=completed, failed_pages=failed_pages, failures=failures,
                   rate_limited=rate_limited, not_found=not_found,
                   capped=len(queue) > args.max_results or posts_per_profile > 0, exclusions=exclusions,
                   media_blocked=bool(getattr(engine, "media_blocked", False)))
+    if interrupted or any(f["reason"] == INTERRUPTED for f in failures):
+        return STOP.report(args, rows=len(products), done=completed, total=len(queue[:args.max_results]))
+    return code
 
 
 def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bool, engine_name: str,
@@ -459,7 +540,7 @@ def finish(args, *, products: List[Product], blocked: bool, remote_api_error: bo
         failed_pages=failed_pages or None, blocked=blocked, remote_api_error=remote_api_error,
         allow_empty=args.allow_empty, started_at=started_at, price_confirmed_pct=None,
         max_results=args.max_results, rate_limited=rate_limited,
-        incomplete_reason=next((f["reason"] for f in (failures or []) if f["reason"] in ("parse_error", "proxy_pool_exhausted", _meter.STOP_REASON)), None),
+        incomplete_reason=next((f["reason"] for f in (failures or []) if f["reason"] in (INTERRUPTED, "parse_error", "proxy_pool_exhausted", _meter.STOP_REASON)), None),
         capped=bool(capped) if capped is not None else len(urls) > args.max_results or bool(getattr(args, "posts", 0)),
         extra_meta=extra,
     )
@@ -481,11 +562,44 @@ def validate_common(args, *, urls, skipped, print_err) -> Optional[int]:
     if not 0 <= int(getattr(args, "posts", 0) or 0) <= MAX_TIMELINE_POSTS:
         print_err(f"Error: --posts must be between 0 and {MAX_TIMELINE_POSTS} — a logged-out profile page embeds only its first {MAX_TIMELINE_POSTS} posts")
         return EXIT_BAD_USAGE
+    if len(urls) > args.max_results:
+        # The cap never drops an input silently: posts queued by --posts are
+        # what it trims, so it must hold every input first.
+        print_err(f"Error: --max-results {args.max_results} is smaller than the {len(urls)} inputs — raise it to at "
+                  f"least {len(urls)} (plus room for --posts), or split the list")
+        return EXIT_BAD_USAGE
+    message = check_output_path(args)
+    if message:
+        print_err(f"Error: {message}")
+        return EXIT_BAD_USAGE
     try:
         run_state.prepare(args, urls)
     except (ValueError, OSError, TypeError, KeyError) as exc:
         print_err(f"Error: {_redact(str(exc))}")
         return EXIT_BAD_USAGE
+    return None
+
+
+def check_output_path(args) -> Optional[str]:
+    """Why `--out` cannot be written, or None. Checked before the first
+    request: finding out after a full (and possibly paid) run loses it all."""
+    import os
+    out = _Path(args.out or f"instagram_results.{args.format}")
+    resolved = out.resolve()
+    if resolved.is_dir():
+        return f"--out {str(out)!r} is a directory — give a file path, e.g. {str(out / ('results.' + args.format))!r}"
+    parent = resolved.parent
+    if not parent.is_dir():
+        return f"--out {str(out)!r}: directory {str(parent)!r} does not exist"
+    if not os.access(parent, os.W_OK):
+        return f"--out {str(out)!r}: directory {str(parent)!r} is not writable"
+    outputs = {resolved, _Path(str(resolved) + ".meta.json")}
+    for flag, value in (("--urls-file", getattr(args, "urls_file", None)),
+                        ("--incremental-from", getattr(args, "incremental_from", None)),
+                        ("--proxy-file", getattr(args, "proxy_file", None)),
+                        ("--checkpoint", getattr(args, "checkpoint", None))):
+        if value and _Path(value).resolve() in outputs:
+            return f"--out {str(out)!r} would overwrite {flag} {value!r} — choose another output path"
     return None
 
 
@@ -506,31 +620,102 @@ def start_proxy_meter(args, proxy_pool) -> "_meter.ProxyMeter":
     return _meter.start(getattr(args, "proxy_budget_mb", _meter.DEFAULT_BUDGET_MB), active=active)
 
 
-def proxy_precheck(args, proxy_pool, *, urls: List[str], engine_name: str, started_at: float,
-                   print_err=None) -> Optional[int]:
-    """Pre-check the exit the first URL will use; return the exit code to
-    stop with, or None to go on.
+PROXY_PRECHECK_WORKERS = 8
 
-    A gateway 407 or 402 prints why (naming INSTAGRAM_PROXY, never its
-    value), writes `<out>.latest_attempt.meta.json` (status failed,
-    stop_reason proxy_auth_failed), leaves the output and `<out>.meta.json`
-    untouched, and returns exit 5. Never sent over --cdp-endpoint or
-    --scraper-api (no local proxy there) or without a proxy. Anything else —
-    a 200, a 403 from the site, a timeout — returns None: the run carries on
-    unchanged. One request, never retried and never rotated to another exit.
+
+def load_proxy_pool(args, *, can_authenticate: bool = True, print_err=None):
+    """(pool or None, exit code or None) — the proxy setup every engine
+    shares, so a usage problem is refused BEFORE a browser starts, the same
+    way in all three:
+
+    * an unreadable `--proxy-file`, or one with no proxy in it (only blank
+      or `#` lines) is a usage error — a run that was given a proxy file
+      must never fall back to this machine's own address;
+    * a SOCKS proxy with a login: Chromium cannot authenticate one;
+    * any proxy with a login on an engine that cannot authenticate
+      (`can_authenticate=False`: Selenium's --proxy-server);
+    * with --cdp-endpoint the remote session carries its own exit, so a
+      proxy is ignored (with a warning) after it parsed.
     """
     import sys
+    from proxy_pool import ProxyPool, ProxyParseError, load_proxies
+    print_err = print_err or (lambda m: print(m, file=sys.stderr))
+    try:
+        proxies = load_proxies(args.proxy, args.proxy_file)
+    except ProxyParseError as exc:
+        print_err(f"Error: {exc}")
+        return None, 2
+    except (OSError, UnicodeDecodeError) as exc:
+        print_err(f"Error: could not read --proxy-file {args.proxy_file!r}: {exc}")
+        return None, 2
+    if getattr(args, "cdp_endpoint", None):
+        if proxies:
+            _log.warning("Ignoring --proxy: a --cdp-endpoint session already carries its own exit IP.")
+        return None, None
+    if args.proxy_file and not args.proxy and not proxies:
+        print_err(f"Error: --proxy-file {args.proxy_file!r} has no proxy in it (every line is blank or a # comment) — "
+                  "refusing to fall back to this machine's own address")
+        return None, 2
+    for proxy in proxies:
+        if proxy.has_auth and proxy.scheme.lower().startswith("socks"):
+            print_err(f"Error: {proxy.masked()} — Chromium cannot authenticate a SOCKS proxy. Use an http:// proxy "
+                      "for a login, or a SOCKS proxy that allows this IP without one")
+            return None, 2
+        if proxy.has_auth and not can_authenticate:
+            print_err(f"Error: {proxy.masked()} carries a login — Selenium's --proxy-server cannot authenticate, so "
+                      "every request would get 407. Use playwright_scraper.py or puppeteer_scraper.py for this proxy, "
+                      "or an IP-allowlisted proxy without a login")
+            return None, 2
+    if not proxies:
+        return None, None
+    return ProxyPool(proxies, shuffle=args.proxy_shuffle, block_retries=args.proxy_block_retries), None
+
+
+def proxy_precheck(args, proxy_pool, *, urls: List[str], engine_name: str, started_at: float,
+                   print_err=None) -> Optional[int]:
+    """Pre-check EVERY exit in the pool; return the exit code to stop with,
+    or None to go on.
+
+    An exit whose gateway answers 407 or 402 is dropped from the pool (with
+    a warning naming it masked). Only when every exit is dropped does the
+    run stop: it prints why (naming INSTAGRAM_PROXY, never its value),
+    writes `<out>.latest_attempt.meta.json` (status failed, stop_reason
+    proxy_auth_failed), leaves the output and `<out>.meta.json` untouched,
+    and returns exit 5. Never sent over --cdp-endpoint or --scraper-api (no
+    local proxy there) or without a proxy. Anything else — a 200, a 403
+    from the site, a timeout — keeps the exit: one request per exit, never
+    retried.
+    """
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
     import output_writer
     import proxy_pool as _savers
     print_err = print_err or (lambda m: print(m, file=sys.stderr))
     if proxy_pool is None or getattr(args, "cdp_endpoint", None) or getattr(args, "scraper_api", False):
         return None
-    proxy = proxy_pool.peek()
-    if proxy is None or not urls:
+    exits = proxy_pool.live()
+    if not exits or not urls:
         return None
-    try:
-        _savers.precheck_proxy(proxy.url(), _savers.robots_url(urls[0]), timeout=PROXY_PRECHECK_TIMEOUT_S)
-    except _savers.ProxyPrecheckError as exc:
+    probe = _savers.robots_url(urls[0])
+
+    def check(proxy):
+        try:
+            _savers.precheck_proxy(proxy.url(), probe, timeout=PROXY_PRECHECK_TIMEOUT_S)
+        except _savers.ProxyPrecheckError as exc:
+            return exc
+        return None
+
+    with ThreadPoolExecutor(max_workers=min(PROXY_PRECHECK_WORKERS, len(exits))) as pool:
+        verdicts = list(pool.map(check, exits))
+    refused = [(proxy, exc) for proxy, exc in zip(exits, verdicts) if exc is not None]
+    if refused and len(refused) < len(exits):
+        for proxy, exc in refused:
+            proxy_pool.drop(proxy)
+            _log.warning("Proxy pre-check: dropping %s from the pool — %s.", proxy.masked(), exc)
+        _log.info("Proxy pre-check: %d of %d exits usable.", len(exits) - len(refused), len(exits))
+        return None
+    if refused:
+        exc = refused[0][1]
         print_err(_savers.precheck_message(exc, "INSTAGRAM_PROXY", "www.instagram.com"))
         try:
             output_writer.write_failed_attempt(
@@ -556,3 +741,66 @@ def add_media_arguments(parser) -> None:
     # measured for free. Not a user feature.
     parser.add_argument("--force-block-media", action="store_true", help=argparse.SUPPRESS)
     _meter.add_budget_argument(parser)
+
+
+# --------------------------------------------------------------------------- #
+# Ctrl-C and SIGTERM (`docker stop`): finish the URL in hand, write what was
+# read as a `partial` run (stop_reason `interrupted`; a --checkpoint keeps
+# the rest for --resume) and exit 130 / 143. A second signal stops at once.
+# --------------------------------------------------------------------------- #
+INTERRUPTED = "interrupted"
+
+
+class _StopRequest:
+    def __init__(self):
+        self.signum: Optional[int] = None
+
+    @property
+    def requested(self) -> bool:
+        return self.signum is not None
+
+    def _handler(self, signum, _frame):
+        import sys
+        if self.signum is not None:
+            raise KeyboardInterrupt
+        self.signum = signum
+        print("\n[!] Interrupted — finishing the current URL, then writing what was read. "
+              "Press Ctrl-C again to stop at once.", file=sys.stderr, flush=True)
+
+    def install(self) -> None:
+        """From the main thread, before the event loop starts (asyncio.run
+        then leaves SIGINT to this handler)."""
+        import signal
+        import threading
+        self.signum = None
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for sig in (signal.SIGINT, getattr(signal, "SIGTERM", None)):
+            if sig is not None:
+                signal.signal(sig, self._handler)
+
+    def exit_code(self) -> int:
+        import signal
+        return 128 + (self.signum or signal.SIGINT)
+
+    def report(self, args, *, rows: int, done: int, total: int) -> int:
+        import sys
+        written = f"{rows} row(s) written to {args.out} (status partial, stop_reason interrupted)" if rows else \
+            "nothing was written"
+        hint = (f"; continue with the same command plus --resume (checkpoint {args.checkpoint})"
+                if getattr(args, "checkpoint", None) else "; add --checkpoint PATH next time to be able to --resume")
+        print(f"[!] Interrupted after {done} of {total} URLs: {written}{hint}.", file=sys.stderr, flush=True)
+        return self.exit_code()
+
+
+STOP = _StopRequest()
+
+
+def interrupted_exit(args=None) -> int:
+    """For an engine's main(): a second Ctrl-C (or one before the loop)."""
+    import sys
+    hint = ""
+    if args is not None and getattr(args, "checkpoint", None):
+        hint = f" Progress up to the last finished URL is in {args.checkpoint}: re-run with --resume."
+    print(f"\n[!] Interrupted — stopped at once, nothing more was written.{hint}", file=sys.stderr, flush=True)
+    return STOP.exit_code()

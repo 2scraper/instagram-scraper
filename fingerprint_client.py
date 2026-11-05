@@ -8,6 +8,8 @@ Two rules, both from the family's invariants:
     brings its own device identity; stacking a second on top creates a
     contradiction (mismatched UA/TLS/JS fingerprint) rather than better
     cover. `apply_fingerprint()` refuses and warns instead of applying one.
+  - Only a desktop-Chrome profile is used (`choose_user_agent`), and its
+    Chrome version is set to the running browser's (`align_user_agent`).
   - The user agent comes from the BROWSER, never a literal string. A
     hardcoded UA drifts from whatever Chromium build is actually installed,
     and claiming an older Chrome than the JS engine/TLS handshake report is
@@ -17,6 +19,7 @@ Two rules, both from the family's invariants:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from scraper_api_client import TwoCaptchaClient, TwoCaptchaError
@@ -35,6 +38,60 @@ def fetch_fingerprint(
     except TwoCaptchaError as exc:
         log.warning("Fingerprint API request failed, continuing without one: %s", exc)
         return None
+
+
+# A profile is used only if it is desktop Chrome: a phone's user agent gets
+# Instagram's MOBILE layout, which this scraper does not read (measured
+# 2026-10-26: 4 of 4 Android profiles ended in exit 5, 4 of 4 Windows ones
+# read), and an Edge/Opera/Firefox/Safari brand on top of Chromium is a
+# mismatch of its own. Asked again up to this many times.
+FINGERPRINT_ATTEMPTS = 5
+_MOBILE_UA_RE = re.compile(r"\b(Mobile|Android|iPhone|iPad|iPod)\b")
+_OTHER_BRAND_RE = re.compile(r"\b(Edg|EdgA|EdgiOS|OPR|YaBrowser|SamsungBrowser|Firefox|FxiOS|CriOS|Vivaldi)/")
+_CHROME_VERSION_RE = re.compile(r"\bChrome/(\d+)(?:\.\d+)*")
+
+
+def unsuitable_reason(user_agent: str) -> Optional[str]:
+    """Why a profile's user agent is not used, or None."""
+    if _MOBILE_UA_RE.search(user_agent):
+        return "a phone's (Instagram serves it the mobile layout, which is not read)"
+    if _OTHER_BRAND_RE.search(user_agent) or not _CHROME_VERSION_RE.search(user_agent):
+        return "not desktop Chrome (the browser here is Chromium)"
+    return None
+
+
+def choose_user_agent(client: TwoCaptchaClient, *, tags: Optional[str] = None,
+                      country: Optional[str] = None, attempts: int = FINGERPRINT_ATTEMPTS) -> Optional[str]:
+    """A desktop-Chrome user agent from the Fingerprint API, or None (the
+    run then keeps the browser's own). Each unsuitable profile is logged."""
+    for _ in range(max(1, attempts)):
+        profile = fetch_fingerprint(client, tags=tags, country=country)
+        if not profile:
+            return None
+        user_agent = user_agent_from(profile)
+        if not user_agent:
+            return None
+        reason = unsuitable_reason(user_agent)
+        if reason is None:
+            return user_agent
+        log.info("Fingerprint profile skipped — its user agent is %s: %s", reason, user_agent)
+    log.warning("No desktop-Chrome profile in %d Fingerprint API answers — continuing with the browser's own user "
+                "agent. Narrow the choice with --fp-tags Windows.", attempts)
+    return None
+
+
+def align_user_agent(user_agent: Optional[str], browser_version: Optional[str]) -> Optional[str]:
+    """The profile's user agent with its Chrome major version set to the
+    browser that actually runs (`Chrome/156.0.0.0`, the reduced form Chrome
+    itself sends): a UA claiming another Chrome than the JS engine and the
+    TLS handshake is a mismatch a bot-detector keys on. Unchanged when the
+    browser version is unknown."""
+    if not user_agent:
+        return user_agent
+    match = re.search(r"(\d+)\.", browser_version or "")
+    if not match:
+        return user_agent
+    return _CHROME_VERSION_RE.sub("Chrome/%s.0.0.0" % match.group(1), user_agent)
 
 
 def user_agent_from(fingerprint: dict) -> Optional[str]:

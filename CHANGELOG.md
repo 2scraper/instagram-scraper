@@ -8,28 +8,62 @@ that changes a default is called out at the top of its entry.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
 > **Behaviour changes.**
 > * Behind `--proxy` / `--proxy-file`, all three browser engines send one
->   `HEAD https://www.instagram.com/robots.txt` through the first exit before
->   launching a browser. A gateway `407` (credential refused, or traffic
->   exhausted) or `402` (traffic/balance exhausted) now ends the run with exit
->   5 and `stop_reason: proxy_auth_failed` in the new
->   `<out>.latest_attempt.meta.json`. No browser is started, and `<out>` and
->   `<out>.meta.json` are left as they were. Any other answer, or a transport
->   error, leaves the run as it was. Not sent with `--cdp-endpoint`,
->   `--scraper-api` or without a proxy.
+>   `HEAD https://www.instagram.com/robots.txt` through every exit of the
+>   pool before launching a browser. An exit whose gateway answers `407`
+>   (credential refused, or traffic exhausted) or `402` (traffic/balance
+>   exhausted) is dropped from the pool with a warning; only when every exit
+>   is refused does the run end with exit 5 and `stop_reason:
+>   proxy_auth_failed` in the new `<out>.latest_attempt.meta.json`. No
+>   browser is started then, and `<out>` and `<out>.meta.json` are left as
+>   they were. Any other answer, or a transport error, keeps the exit. Not
+>   sent with `--cdp-endpoint`, `--scraper-api` or without a proxy.
 > * Behind a local proxy, images, video/audio and web fonts are no longer
 >   downloaded. Playwright aborts them by resource type. Puppeteer fails them
 >   in the `Fetch` handler that answers the proxy's password prompt. Selenium
 >   blocks them by URL extension. `--load-media` restores the old behaviour.
 >   Nothing changes with `--cdp-endpoint`, `--scraper-api` or with no proxy.
 >   `<out>.meta.json` records `media_blocked`.
-> * Behind a local proxy, a run now stops once about 10 MB have gone through
+> * Behind a local proxy, a run now stops once about 50 MB have gone through
 >   it (`--proxy-budget-mb`, `0` = unlimited): the rows read so far are kept
 >   and the run exits 6 (5 with none), `stop_reason: proxy_budget_exceeded`.
->   A proxied run that collects nothing now writes
+>   A budget crossed while the last page loads, with every page read, leaves
+>   the run `complete` (exit 0, `proxy_budget_exceeded: true` in the
+>   sidecar). A proxied run that collects nothing now writes
 >   `<out>.latest_attempt.meta.json` with its outcome and byte count. Not
 >   applied with `--cdp-endpoint`, `--scraper-api` or without a proxy.
+> * Usage problems found before anything is fetched now exit 2 instead of
+>   running: a `--proxy-file` that cannot be read (was a traceback, exit 1)
+>   or has no proxy in it (the run went out from this machine's own address);
+>   a SOCKS proxy with a login (Chromium cannot authenticate one; was exit 5
+>   after the browser started); any proxy with a login on Selenium (its
+>   credentials were stripped and every page got 407); `--url` together with
+>   `--urls-file` (the file was ignored); an `--out` whose directory is
+>   missing, that is a directory, or that is the `--urls-file`,
+>   `--incremental-from`, `--proxy-file` or `--checkpoint` (the run used to
+>   finish and then crash, or overwrite its own input); and a
+>   `--max-results` smaller than the number of inputs.
+> * `--max-results` no longer drops input profiles. It used to fill up with
+>   the posts of the first profiles, so later profiles were never opened
+>   while the run still said `complete`. Every input is now read; the cap
+>   trims only posts found by `--posts`, each listed in `excluded_urls` as
+>   `max_results` with a warning.
+> * Ctrl-C and SIGTERM (`docker stop`) finish the URL in hand, write the rows
+>   read so far as `partial` (`stop_reason: interrupted`) and exit 130 / 143
+>   with a `--resume` hint. They used to exit 1 ("crash") silently and, without
+>   `--checkpoint`, lose everything read. A second Ctrl-C stops at once.
+> * `diff_runs.py` exits 2 when it cannot compare (missing file or sidecar,
+>   partial run, another selection); exit 1 now only ever means "changed"
+>   under `--fail-on-change`.
+> * Every page is opened with `?hl=en`, so `alt_text` is English on every
+>   engine and mode. It followed the visitor's language: the OS locale for
+>   Puppeteer on macOS, the remote profile's over `--cdp-endpoint`, the
+>   exit's country through `--scraper-api` (Dutch, Finnish...).
+> * New post columns `location_name`, `location_id`, `location_lat`,
+>   `location_lng` (at the end of the row, `null` without a geotag).
 
 ### Added
 
@@ -41,7 +75,7 @@ that changes a default is called out at the top of its entry.
   an estimate of the tunnelled payload (TLS/`CONNECT` overhead not
   included). The sidecar records `proxy_bytes`, `proxy_budget_bytes` and
   `proxy_budget_exceeded`, and a proxied run ends with one `Proxy traffic:
-  X.X MB of Y MB budget` line. New flag `--proxy-budget-mb` (default 10).
+  X.X MB of Y MB budget` line. New flag `--proxy-budget-mb` (default 50).
   The proxy pre-check's own `HEAD` is counted too.
 - CI only: the canary passes `--proxy-budget-mb 10`, writes `**canary**:
   proxy traffic X.X MB of 10 MB` to the job summary, and fails with
@@ -51,6 +85,8 @@ that changes a default is called out at the top of its entry.
 
 ### Changed
 
+- Puppeteer: pyppeteer's per-URL `Browser listening on...` / `terminate chrome
+  process...` INFO lines are no longer logged.
 - CI only: a failed canary check now always ends with an `::error::` line. A run
   through the `INSTAGRAM_PROXY` secret that exited nonzero used to end red with no
   annotation, and a missing or wrong output file showed only a traceback.
@@ -62,6 +98,47 @@ that changes a default is called out at the top of its entry.
 
 ### Fixed
 
+Found in a manual QA pass of `main` @ 6764b74 (2026-10-25 to 11-05); each has a
+test in `tests/test_qa_fixes.py`.
+
+- A `--proxy-file` with only blank or `#` lines silently ran from this
+  machine's own address; a missing one gave a traceback (see above).
+- `--max-results` silently dropped whole input profiles (see above).
+- Puppeteer on Apple Silicon died at launch with no hint: pyppeteer's own
+  Chromium is an x86_64 build. An installed Google Chrome or Chromium from
+  `/Applications` is now used there; otherwise the error names
+  `PYPPETEER_EXECUTABLE_PATH`.
+- A failed navigation through a `--proxy-file` pool was retried through the
+  same exit (three 45 s timeouts on an exit refusing its credential, then the
+  URL was lost). With more than one exit left, the retry now goes through the
+  next one and the failure counts against the exit (`--proxy-block-retries`).
+- A refused first exit stopped the whole run although the pool had working
+  ones (see the pre-check above).
+- A UTF-8 BOM (Notepad, Excel) glued itself to the first line of
+  `--urls-file` / `--proxy-file`, which was then skipped.
+- A `--urls-file` with only comments said "provide --url or --urls-file";
+  it now says the file has no inputs.
+- `nasa/`, `m.instagram.com/...` and `instagr.am/p/...` inputs were skipped.
+- `--dump-html` into a missing directory turned a page that loaded into
+  exit 5; a failed dump is now a warning.
+- `--fingerprint` without `--fp-tags` picked a phone's user agent about half
+  the time, and Instagram then served its mobile layout, reported as "not an
+  Instagram page" (exit 5). Only a desktop-Chrome profile is used now (up to
+  5 tries), and the mobile layout is named as such. The applied user agent's
+  Chrome version is set to the browser that actually runs (it claimed 151
+  on Chromium 156), and Edge/Opera profiles are skipped.
+- The "blocked" hint through `--scraper-api` suggested `--proxy-file`, which
+  that mode ignores; it now suggests a browser engine or
+  `INSTAGRAM_CDP_ENDPOINT`.
+- `diff_runs.py` JSON against CSV reported every row as `source_changed`
+  (`null` vs an empty cell), and always printed price and currency lines
+  for rows that have no price.
+- `python3 env_config.py` showed the `.env` value of a variable exported
+  empty, although the run uses none.
+- `.dockerignore` now excludes the per-engine `.venv-*/` directories.
+- README: Puppeteer's `PYPPETEER_EXECUTABLE_PATH`, `--allow-different-scope`,
+  `--twocaptcha-key` / `--captcha-api`, the exit-2 cases and the location
+  columns are documented; the stale check count is gone.
 - Proxy traffic meter: Selenium and Puppeteer no longer count requests that never leave the browser. Chrome's new-tab page loads `chrome://` scripts (about 2.8 MB, seen through a stub proxy) that were reported as finished loads and added to `proxy_bytes`, enough to bring a run noticeably closer to `--proxy-budget-mb`. Only `http(s)` requests and responses are counted now. The block sent once the budget is spent is also handed to the page's own event loop, so it works when the budget runs out on another thread.
 
 ## [0.3.0] - 2026-10-15
@@ -202,4 +279,5 @@ First release.
 - `web_profile_info` answers 401 `require_login` logged out (2026-10-04),
   so it is not used.
 - No `location`, post-count or play-count column: none is served to a
-  logged-out visitor (`location` was null on 36 of 36 posts).
+  logged-out visitor (`location` was null on 36 of 36 posts; a geotagged
+  post was found later, see 0.4.0).

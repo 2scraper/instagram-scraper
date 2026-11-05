@@ -156,6 +156,13 @@ def _report() -> None:
         in_dotenv = env_key in dotenv_values and not _is_placeholder(dotenv_values[env_key])
         if in_env:
             source, raw = "exported environment variable", os.environ[env_key]
+        elif env_key in os.environ:
+            # apply_env stops at an exported variable even when it is empty
+            # (`export INSTAGRAM_PROXY=` switches the proxy off), so .env is
+            # NOT consulted — say so instead of showing the .env value.
+            source = ("(unset — exported empty, so the .env value is not used)" if not os.environ[env_key].strip()
+                      else "(exported value still has a {...} placeholder fragment — treated as unset)")
+            raw = None
         elif in_dotenv:
             source, raw = ".env", dotenv_values[env_key]
         elif env_key in os.environ and _BRACED_PLACEHOLDER_RE.search(os.environ[env_key]):

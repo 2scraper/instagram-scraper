@@ -41,6 +41,7 @@ class Session:
         self.engine, self.url = engine, ''
 
     async def goto(self, target):
+        target = target.removesuffix('?hl=en')  # page_flow pins the page language (pp.fetch_url)
         self.url = target
         e = self.engine
         e.gotos += 1
@@ -141,13 +142,13 @@ class Regressions(unittest.TestCase):
     def test_batch_scope(self):
         a = self.run_flow('good', numbers=(1, 2), name='a')[-1]
         b = self.run_flow('good', numbers=(1, 3), name='b')[-1]
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(diff_runs.DiffError):
             diff_runs.diff(a, b)
         self.assertEqual(diff_runs.diff(a, a)['removed'], [])
 
     def test_partial_run_cannot_be_diffed(self):
         out = self.run_flow('throttled', name='p')[-1]
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(diff_runs.DiffError):
             diff_runs.diff(out, out)
 
     def test_url_validation(self):
